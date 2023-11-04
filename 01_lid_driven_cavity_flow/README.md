@@ -25,12 +25,11 @@ $$\int_\Omega \nabla (pv) = \int _{\partial \Omega} pv\hat{n} \\
 
 Combining the three above
 
-$$-\int_\Omega \nu \nabla(v\nabla u) + \int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u + \int_\Omega \frac{\nabla(pv)}{\rho} - \int_\Omega \frac{p \nabla v}{\rho} = \int_\Omega vg \\
-\int_\Omega q \nabla u = 0
-\int_{\partial \Omega} \nu v \hat{n}\nabla u+ \int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u + \int _{\partial \Omega} \frac{pv\hat{n}}{\rho} - \int_\Omega \frac{p \nabla v}{\rho} = \int_\Omega vg \\
-\underbrace{\int_{\partial \Omega} \left(\nu v \hat{n}\nabla u +  \frac{pv\hat{n}}{\rho}\right)}_{\text{Neumann boundary condition: } \Gamma_N = \empty} + \int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u - \int_\Omega \frac{p \nabla v}{\rho} = \int_\Omega vg $$
+$$-\int_\Omega \nu \nabla(v\nabla u) + \int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u + \int_\Omega \frac{\nabla(pv)}{\rho} - \int_\Omega \frac{p \nabla v}{\rho} = \int_\Omega vg \\ \int_\Omega q \nabla u = 0
+\int_{\partial \Omega} \nu v \hat{n}\nabla u+ \int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u + \int _{\partial \Omega} \frac{pv\hat{n}}{\rho} - \int_\Omega \frac{p \nabla v}{\rho} = \int_\Omega vg
+\\ \underbrace{\int_{\partial \Omega} \left(\nu v \hat{n}\nabla u +  \frac{pv\hat{n}}{\rho}\right)}_{\text{Neumann boundary condition: } \Gamma_N = \empty} + \int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u - \int_\Omega \frac{p \nabla v}{\rho} = \int_\Omega vg $$
 
-$$\int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u - \int_\Omega \frac{p \nabla \cdot v}{\rho} + \int_\Omega q \nabla \cdot u= \int_\Omega vg + 0\\$$
+$$\int_\Omega \nu \nabla v \nabla u + \int_\Omega vu\nabla u - \int_\Omega \frac{p \nabla \cdot v}{\rho} + \int_\Omega q \nabla \cdot u= \int_\Omega vg + 0$$
 
 Assuming $\nu = 1$, $\rho = 1$, $g=0$:
 
