@@ -44,6 +44,12 @@ Assuming $\nu = 1$, $\rho = 1$, $g=0$:
 
 $$\int_\Omega \nabla v \nabla u - \int_\Omega p \nabla v  + \int_\Omega q \nabla u + \int_\Omega vu\nabla u = 0$$
 
+## Results
+
+Velocity             |  Pressure
+:-------------------------:|:-------------------------:
+![](velocity.png)  |  ![](pressure.png)
+
 ## Useful links
 * Stokes flow example https://github.com/Wells-Group/dlrbnicsx/blob/main/demo/stokes_flow_dlrbnicsx/dolfinx_stokes_flow.py
 * Different stokes flow example: https://docs.fenicsproject.org/dolfinx/main/python/demos/demo_stokes.html
