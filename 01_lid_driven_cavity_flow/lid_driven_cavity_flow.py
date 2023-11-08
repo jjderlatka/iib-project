@@ -12,8 +12,9 @@ import numpy as np
 
 from petsc4py import PETSc
 
-from dolfinx.plot import vtk_mesh
-import pyvista
+# NOTE Commented since paraview is fixed now
+# from dolfinx.plot import vtk_mesh
+# import pyvista
 
 # Creating the mesh
 gmsh.initialize()
@@ -23,6 +24,7 @@ gdim = 2 # dimension of the model
 
 gmsh.model.add("parallelogram")
 
+# TODO fine mesh at the lid boundary
 A = gmsh.model.geo.addPoint(0, 0, 0, mesh_size)  # (x, y, z, mesh size)
 B = gmsh.model.geo.addPoint(1, 0, 0, mesh_size)
 C = gmsh.model.geo.addPoint(2, 1, 0, mesh_size)
@@ -64,7 +66,25 @@ w_test = ufl.TestFunction(W)
 fdim = mesh.topology.dim - 1
 
 # Dirichlet boundary conditions
+# Velocity
+# No-slip walls
+u_nonslip = fem.Function(V)
+u_nonslip.interpolate(lambda x: (np.zeros_like(x[0]), np.zeros_like(x[1])))
+bcu_walls = fem.dirichletbc(u_nonslip, fem.locate_dofs_topological((W.sub(0), V), fdim, facet_markers.find(wall_marker)), W.sub(0))
+# Driving lid
+u_lid = fem.Function(V)
+u_lid.interpolate(lambda x: (np.ones(x[0].shape), np.zeros(x[1].shape)))
+bcu_lid = fem.dirichletbc(u_lid, fem.locate_dofs_topological((W.sub(0), V), fdim, facet_markers.find(lid_marker)), W.sub(0))
 
+# Pressure
+def bottom_left(x):
+    return np.logical_and(np.isclose(x[0], 0), np.isclose(x[1], 0))
+
+p_reference = fem.Function(Q)
+p_reference.interpolate(lambda x: np.zeros(x[0].shape))
+bcp = fem.dirichletbc(p_reference, fem.locate_dofs_geometrical((W.sub(1), Q), bottom_left), W.sub(1))
+
+'''
 # Velocity
 # No-slip walls
 u_nonslip = (0,0)
@@ -79,12 +99,16 @@ def bottom_left(x):
 
 p_reference = PETSc.ScalarType(0)
 bcp = fem.dirichletbc(p_reference, fem.locate_dofs_geometrical(Q, bottom_left), Q)
+'''
 
 # Form
 
 # bilinear parts
-a_1 = ufl.inner(ufl.grad(v), ufl.grad(u)) * ufl.dx # not ufl.dot
-a_2 = - p * ufl.div(v) * ufl.dx # not grad
+nu = PETSc.ScalarType(1.) # NOTE Kinematic viscocity (say Water)
+rho = PETSc.ScalarType(1.) # NOTE Density (say Water)
+# NOTE nu and rho added in equation
+a_1 = ufl.inner(ufl.grad(v), nu * ufl.grad(u)) * ufl.dx # not ufl.dot
+a_2 = - p * ufl.div(v) / rho * ufl.dx # not grad
 a_3 = q * ufl.div(u) * ufl.dx # not grad
 # non-linear part
 b = ufl.inner(v, ufl.grad(u) * u) * ufl.dx
@@ -101,27 +125,46 @@ solver.report = True
 ksp = solver.krylov_solver
 opts = PETSc.Options()
 option_prefix = ksp.getOptionsPrefix()
+opts[f"{option_prefix}ksp_type"] = "bcgs" # NOTE "preonly"
+opts[f"{option_prefix}pc_type"] = "none" # NOTE "lu"
+ksp.setFromOptions()
+# TODO Try different solvers and change number of mesh points and number of processes
+
+'''
+ksp = solver.krylov_solver
+opts = PETSc.Options()
+option_prefix = ksp.getOptionsPrefix()
 opts[f"{option_prefix}ksp_type"] = "cg"
 opts[f"{option_prefix}pc_type"] = "gamg"
 opts[f"{option_prefix}pc_factor_mat_solver_type"] = "mumps"
 ksp.setFromOptions()
+'''
 
-# log.set_log_level(log.LogLevel.INFO)
+log.set_log_level(log.LogLevel.INFO)
 n, converged = solver.solve(w_trial)
 assert (converged)
 print(f"Number of interations: {n:d}")
 
 # # Saving the result
-# results_folder = Path("results")
-# results_folder.mkdir(exist_ok=True, parents=True)
-# filename = results_folder / "lid_driven_cavity_flow"
+results_folder = Path("results")
+results_folder.mkdir(exist_ok=True, parents=True)
+filename = results_folder / "lid_driven_cavity_flow_velocity" # NOTE filename for velocity
 
 # with io.VTXWriter(mesh.comm, filename.with_suffix(".bp"), [w_trial.sub(0)]) as vtx:
 #     vtx.write(0.0)
-# with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-#     xdmf.write_mesh(mesh)
-#     xdmf.write_function(w_trial.sub(0))
+with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+     xdmf.write_mesh(mesh)
+     xdmf.write_function(w_trial.sub(0).collapse())
 
+filename = results_folder / "lid_driven_cavity_flow_pressure" # NOTE filename for pressure
+
+with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+     xdmf.write_mesh(mesh)
+     xdmf.write_function(w_trial.sub(1).collapse())
+
+exit()
+
+# NOTE Did not fix as paraview plotting is fixed now
 # Plot
 pyvista.start_xvfb()
 pyvista.OFF_SCREEN = True
