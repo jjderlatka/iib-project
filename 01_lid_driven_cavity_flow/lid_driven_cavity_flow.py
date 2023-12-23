@@ -13,7 +13,7 @@ import numpy as np
 from petsc4py import PETSc
 
 # *** PARAMETERS ***
-a = 2
+a = 1
 b = 1
 theta = np.pi / 4
 
