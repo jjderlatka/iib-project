@@ -141,7 +141,7 @@ ksp.setFromOptions()
 
 log.set_log_level(log.LogLevel.INFO)
 
-parameters_array = [Parameters(1, 1, np.pi/6), Parameters(1, 2, np.pi/6), Parameters(1, 1, np.pi/4)]
+parameters_array = [Parameters(), Parameters(1, 1, np.pi/6), Parameters(1, 2, np.pi/6), Parameters(1, 1, np.pi/4)]
 for parameters in parameters_array:
     # Deform mesh
     with HarmonicMeshMotion(mesh, 
