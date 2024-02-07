@@ -15,14 +15,16 @@ import numpy as np
 from petsc4py import PETSc
 
 class Parameters():
-    def __init__(self, a=1, b=1, theta=np.pi / 2):
+    def __init__(self, a=1, b=1, theta=np.pi / 2, nu=PETSc.ScalarType(1.), rho=PETSc.ScalarType(1.)):
         self.a = a
         self.b = b
         self.theta = theta
+        self.nu = nu # NOTE Kinematic viscocity
+        self.rho = rho # NOTE Density
 
 
     def __repr__(self):
-        return f"a={self.a},b={self.b},theta={self.theta:.2f}"
+        return f"a={self.a},b={self.b},theta={self.theta:.2f},nu={self.nu:.2f},rho={self.rho:.2f}"
 
 
     def matrix(self):
@@ -35,9 +37,6 @@ class Parameters():
 
 
 parameters = Parameters()
-
-nu = PETSc.ScalarType(1.) # NOTE Kinematic viscocity (say Water)
-rho = PETSc.ScalarType(1.) # NOTE Density (say Water)
 
 # Creating the mesh
 gmsh.initialize()
