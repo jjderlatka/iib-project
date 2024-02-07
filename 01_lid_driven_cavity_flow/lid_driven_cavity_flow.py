@@ -112,13 +112,19 @@ class ProblemOnDeformedDomain():
         ksp.setFromOptions()
 
 
-    def interpolate_velocity(self, w_trial):
-        V_interp = dolfinx.fem.VectorFunctionSpace(self._mesh, ("Lagrange", 1))
-        solution_u = dolfinx.fem.Function(V_interp)
-        u_expr = dolfinx.fem.Expression(w_trial.sub(0).collapse(), V_interp.element.interpolation_points())
-        solution_u.interpolate(u_expr)
+    def interpolated_velocity(self, solution_u, parameters):
+        with  HarmonicMeshMotion(self._mesh, 
+                    self._boundaries, 
+                    [self._wall_marker, self._lid_marker], 
+                    [parameters.transform, parameters.transform], 
+                    reset_reference=True, 
+                    is_deformation=True):
+            V_interp = dolfinx.fem.VectorFunctionSpace(self._mesh, ("Lagrange", 1))
+            interpolated_u = dolfinx.fem.Function(V_interp)
+            u_expr = dolfinx.fem.Expression(solution_u, V_interp.element.interpolation_points())
+            interpolated_u.interpolate(u_expr)
 
-        return solution_u
+            return interpolated_u
     
 
     def save_results(self, solution_vel, solution_p, parameters):
@@ -129,7 +135,7 @@ class ProblemOnDeformedDomain():
         filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
 
         with  HarmonicMeshMotion(self._mesh, 
-                    self._subdomains, 
+                    self._boundaries, 
                     [self._wall_marker, self._lid_marker], 
                     [parameters.transform, parameters.transform], 
                     reset_reference=True, 
@@ -165,10 +171,8 @@ class ProblemOnDeformedDomain():
 
             n, converged = solver.solve(w_trial)
 
-            solution_u = self.interpolate_velocity(w_trial)
+            solution_u = w_trial.sub(0).collapse()
             solution_p = w_trial.sub(1).collapse()
-
-            self.save_results(solution_u, solution_p, parameters)
 
             return solution_u, solution_p
 
@@ -186,4 +190,5 @@ parameters = Parameters(theta=np.pi/6, a=2)
 problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
                                              HarmonicMeshMotion)
 
-problem_parametric.solve(parameters)
+solution_u, solution_p = problem_parametric.solve(parameters)
+problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u, parameters), solution_p, parameters)
