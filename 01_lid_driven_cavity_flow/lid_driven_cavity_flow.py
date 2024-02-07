@@ -1,18 +1,15 @@
-import gmsh
-
 from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
-
-from dolfinx import io 
-from mpi4py import MPI
-from pathlib import Path
-
-import ufl
-from dolfinx import fem, log
-from dolfinx.fem.petsc import NonlinearProblem
 from dolfinx.nls.petsc import NewtonSolver
+
+import dolfinx
+import ufl
+
 import numpy as np
 
+from mpi4py import MPI
 from petsc4py import PETSc
+
+from pathlib import Path
 
 class Parameters():
     def __init__(self, a=1, b=1, theta=np.pi / 2, nu=PETSc.ScalarType(1.), rho=PETSc.ScalarType(1.)):
@@ -36,140 +33,157 @@ class Parameters():
         return self.matrix() @ x[:gdim]
 
 
-parameters = Parameters()
+class ProblemOnDeformedDomain():
+    def __init__(self, mesh, subdomains, boundaries, meshDeformationContext):
+        # Mesh, Subdomians and Boundaries, Mesh deformation
+        self._mesh = mesh
+        self.gdim = self._mesh.geometry.dim
+        self._subdomains = subdomains # NOTE cell_markers
+        self._boundaries = boundaries # NOTE facet_markers
+        self.meshDeformationContext = meshDeformationContext # TODO obsolete
 
-# Creating the mesh
-gmsh.initialize()
+        self._fluid_marker, self._lid_marker, self._wall_marker = 1, 2, 3
 
-mesh_size = 0.1 # 0.04
-gdim = 2 # dimension of the model
+        # Function spaces
+        P2 = ufl.VectorElement("Lagrange", self._mesh.ufl_cell(), 2)
+        P1 = ufl.FiniteElement("Lagrange", self._mesh.ufl_cell(), 1)
+        UP = P2 * P1
 
-gmsh.model.add("parallelogram")
-
-A = gmsh.model.geo.addPoint(0, 0, 0, mesh_size)
-B = gmsh.model.geo.addPoint(parameters.a, 0, 0, mesh_size)
-C = gmsh.model.geo.addPoint(parameters.b * np.cos(parameters.theta) + parameters.a, parameters.b * np.sin(parameters.theta), 0, mesh_size)
-D = gmsh.model.geo.addPoint(parameters.b * np.cos(parameters.theta), parameters.b * np.sin(parameters.theta), 0, mesh_size)
-
-AB = gmsh.model.geo.addLine(A, B)
-BC = gmsh.model.geo.addLine(B, C)
-CD = gmsh.model.geo.addLine(C, D)
-DA = gmsh.model.geo.addLine(D, A)
-
-loop = gmsh.model.geo.addCurveLoop([AB, BC, CD, DA])
-gmsh.model.geo.addPlaneSurface([loop])
-
-fluid_marker, lid_marker, wall_marker = 1, 2, 3
-gmsh.model.addPhysicalGroup(2, [loop], fluid_marker)
-gmsh.model.addPhysicalGroup(1, [CD], lid_marker)
-gmsh.model.addPhysicalGroup(1, [AB, BC, DA], wall_marker)
-
-gmsh.model.geo.synchronize()
-gmsh.model.mesh.generate(gdim)
-
-# Importing the mesh to dolfinx
-gmsh_model_rank = 0
-mesh_comm = MPI.COMM_WORLD
-mesh, cell_markers, facet_markers = io.gmshio.model_to_mesh(gmsh.model, mesh_comm, gmsh_model_rank, gdim=gdim)
-
-# Function spaces
-P2 = ufl.VectorElement("Lagrange", mesh.ufl_cell(), 2)
-P1 = ufl.FiniteElement("Lagrange", mesh.ufl_cell(), 1)
-UP = P2 * P1
-
-W = fem.FunctionSpace(mesh, UP)
-V, _ = W.sub(0).collapse()
-Q, _ = W.sub(1).collapse()
-
-w_trial = fem.Function(W)
-(u, p) = ufl.split(w_trial)
-w_test = ufl.TestFunction(W)
-(v, q) = ufl.split(w_test)
-
-fdim = mesh.topology.dim - 1
-
-# Dirichlet boundary conditions
-
-# Velocity
-# No-slip walls
-u_nonslip = fem.Function(V)
-u_nonslip.interpolate(lambda x: (np.zeros_like(x[0]), np.zeros_like(x[1])))
-bcu_walls = fem.dirichletbc(u_nonslip, fem.locate_dofs_topological((W.sub(0), V), fdim, facet_markers.find(wall_marker)), W.sub(0))
-# Driving lid
-u_lid = fem.Function(V)
-u_lid.interpolate(lambda x: (np.ones(x[0].shape), np.zeros(x[1].shape)))
-bcu_lid = fem.dirichletbc(u_lid, fem.locate_dofs_topological((W.sub(0), V), fdim, facet_markers.find(lid_marker)), W.sub(0))
-
-# Pressure
-def bottom_left(x):
-    return np.logical_and(np.isclose(x[0], 0), np.isclose(x[1], 0))
-
-p_reference = fem.Function(Q)
-p_reference.interpolate(lambda x: np.zeros(x[0].shape))
-bcp = fem.dirichletbc(p_reference, fem.locate_dofs_geometrical((W.sub(1), Q), bottom_left), W.sub(1))
-
-# Form
-
-# Bilinear parts
-a_1 = ufl.inner(ufl.grad(v), nu * ufl.grad(u)) * ufl.dx
-a_2 = - p * ufl.div(v) / rho * ufl.dx
-a_3 = q * ufl.div(u) * ufl.dx
-
-# Non-linear part
-b = ufl.inner(v, ufl.grad(u) * u) * ufl.dx
-F = a_1 + a_2 + a_3 + b
-
-# Nonlinear problem assembly
-problem = NonlinearProblem(F, w_trial, bcs=[bcu_walls, bcu_lid, bcp])
+        self._W = dolfinx.fem.FunctionSpace(self._mesh, UP)
+        self._V, _ = self._W.sub(0).collapse()
+        self._Q, _ = self._W.sub(1).collapse()
 
 
-# Nonlinear problem solution
-solver = NewtonSolver(MPI.COMM_WORLD, problem)
-solver.convergence_criterion = "incremental"
-solver.rtol = 1e-6
-solver.report = True
+    def get_boundary_conditions(self):
+        # Dirichlet boundary conditions
 
-ksp = solver.krylov_solver
-opts = PETSc.Options()
-option_prefix = ksp.getOptionsPrefix()
-opts[f"{option_prefix}ksp_type"] = "bcgs" # NOTE "preonly"
-opts[f"{option_prefix}pc_type"] = "none" # NOTE "lu"
-ksp.setFromOptions()
+        fdim = self._mesh.topology.dim - 1
 
-# TODO Try different solvers and change number of mesh points and number of processes
+        # Velocity
+        # No-slip walls
+        u_nonslip = dolfinx.fem.Function(self._V)
+        u_nonslip.interpolate(lambda x: (np.zeros_like(x[0]), np.zeros_like(x[1])))
+        bcu_walls = dolfinx.fem.dirichletbc(u_nonslip, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(self._wall_marker)), self._W.sub(0))
+        # Driving lid
+        u_lid = dolfinx.fem.Function(self._V)
+        u_lid.interpolate(lambda x: (np.ones(x[0].shape), np.zeros(x[1].shape)))
+        bcu_lid = dolfinx.fem.dirichletbc(u_lid, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(self._lid_marker)), self._W.sub(0))
 
-log.set_log_level(log.LogLevel.INFO)
+        # Pressure
+        def bottom_left(x):
+            return np.logical_and(np.isclose(x[0], 0), np.isclose(x[1], 0))
 
-parameters_array = [Parameters(), Parameters(1, 1, np.pi/6), Parameters(1, 2, np.pi/6), Parameters(1, 1, np.pi/4)]
-for parameters in parameters_array:
-    # Deform mesh
-    with HarmonicMeshMotion(mesh, 
-                    facet_markers, 
-                    [wall_marker, lid_marker], 
+        p_reference = dolfinx.fem.Function(self._Q)
+        p_reference.interpolate(lambda x: np.zeros(x[0].shape))
+        bcp = dolfinx.fem.dirichletbc(p_reference, dolfinx.fem.locate_dofs_geometrical((self._W.sub(1), self._Q), bottom_left), self._W.sub(1))
+
+        return [bcu_walls, bcu_lid, bcp]
+    
+
+    def get_problem_formulation(self, parameters):
+        # Form
+        w_trial = dolfinx.fem.Function(self._W) # TODO check ufl.TrialFunctions(self._W)
+        w_test = ufl.TestFunction(self._W)
+        (u, p) = ufl.split(w_trial)
+        (v, q) = ufl.split(w_test)
+
+        # Bilinear parts
+        a_1 = ufl.inner(ufl.grad(v), parameters.nu * ufl.grad(u)) * ufl.dx
+        a_2 = - p * ufl.div(v) / parameters.rho * ufl.dx
+        a_3 = q * ufl.div(u) * ufl.dx
+
+        # Non-linear part
+        b = ufl.inner(v, ufl.grad(u) * u) * ufl.dx
+        F = a_1 + a_2 + a_3 + b
+
+        return F, w_trial
+    
+
+    def set_solver_options(self, solver):
+        solver.convergence_criterion = "incremental"
+        solver.rtol = 1e-6
+        solver.report = True
+
+        ksp = solver.krylov_solver
+        opts = PETSc.Options()
+        option_prefix = ksp.getOptionsPrefix()
+        opts[f"{option_prefix}ksp_type"] = "bcgs" # NOTE "preonly"
+        opts[f"{option_prefix}pc_type"] = "none" # NOTE "lu"
+        ksp.setFromOptions()
+
+
+    def interpolate_velocity(self, w_trial):
+        V_interp = dolfinx.fem.VectorFunctionSpace(self._mesh, ("Lagrange", 1))
+        solution_u = dolfinx.fem.Function(V_interp)
+        u_expr = dolfinx.fem.Expression(w_trial.sub(0).collapse(), V_interp.element.interpolation_points())
+        solution_u.interpolate(u_expr)
+
+        return solution_u
+    
+
+    def save_results(self, solution_vel, solution_p, parameters):
+        results_folder = Path("results")
+        results_folder.mkdir(exist_ok=True, parents=True)
+
+        filename_pressure = results_folder / "lid_driven_cavity_flow_pressure"
+        filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
+
+        with  HarmonicMeshMotion(self._mesh, 
+                    self._subdomains, 
+                    [self._wall_marker, self._lid_marker], 
+                    [parameters.transform, parameters.transform], 
+                    reset_reference=True, 
+                    is_deformation=True):
+            with dolfinx.io.XDMFFile(self._mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
+                xdmf.write_mesh(self._mesh)
+                xdmf.write_function(solution_vel)
+
+            with dolfinx.io.XDMFFile(self._mesh.comm, filename_pressure.with_suffix(".xdmf"), "w") as xdmf:
+                xdmf.write_mesh(self._mesh)
+                xdmf.write_function(solution_p)
+    
+
+    def solve(self, parameters=Parameters()):
+         with  HarmonicMeshMotion(self._mesh, 
+                    self._boundaries, 
+                    [self._wall_marker, self._lid_marker], 
                     [parameters.transform, parameters.transform], 
                     reset_reference=True, 
                     is_deformation=False):
-        n, converged = solver.solve(w_trial)
-        assert (converged)
-        print(f"Number of interations: {n:d} \t W_trial: {np.max(np.abs(w_trial.x.array))}")
+            F, w_trial = self.get_problem_formulation(parameters)
+            
+            bcs = self.get_boundary_conditions()
 
-        # Saving the result
-        results_folder = Path("results", str(parameters))
-        results_folder.mkdir(exist_ok=True, parents=True)
+            # Nonlinear problem assembly
+            problem = dolfinx.fem.petsc.NonlinearProblem(F, w_trial, bcs)
 
-        V_interp = fem.VectorFunctionSpace(mesh, ("Lagrange", 1))
-        u_interp = fem.Function(V_interp)
-        u_expr = fem.Expression(w_trial.sub(0).collapse(), V_interp.element.interpolation_points())
-        u_interp.interpolate(u_expr)
-        
-        filename = results_folder / "lid_driven_cavity_flow_velocity" # NOTE filename for velocity
-        
-        with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-            xdmf.write_mesh(mesh)
-            xdmf.write_function(u_interp)
+            # Nonlinear problem solution
+            solver = NewtonSolver(MPI.COMM_WORLD, problem)
+            self.set_solver_options(solver)
 
-        filename = results_folder / "lid_driven_cavity_flow_pressure" # NOTE filename for pressure
+            dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO)
 
-        with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-            xdmf.write_mesh(mesh)
-            xdmf.write_function(w_trial.sub(1).collapse())
+            n, converged = solver.solve(w_trial)
+
+            solution_u = self.interpolate_velocity(w_trial)
+            solution_p = w_trial.sub(1).collapse()
+
+            self.save_results(solution_u, solution_p, parameters)
+
+            return solution_u, solution_p
+
+
+comm = MPI.COMM_WORLD
+gdim = 2 # dimension of the model
+gmsh_model_rank = 0
+
+mesh, cell_tags, facet_tags = \
+    dolfinx.io.gmshio.read_from_msh("mesh.msh", comm,
+                                    gmsh_model_rank, gdim=gdim)
+
+# FEM solve
+parameters = Parameters(theta=np.pi/6, a=2)
+problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
+                                             HarmonicMeshMotion)
+
+problem_parametric.solve(parameters)
