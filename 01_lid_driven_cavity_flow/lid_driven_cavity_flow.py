@@ -1,5 +1,7 @@
 import gmsh
 
+from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
+
 from dolfinx import io 
 from mpi4py import MPI
 from pathlib import Path
@@ -12,10 +14,27 @@ import numpy as np
 
 from petsc4py import PETSc
 
-# *** PARAMETERS ***
-a = 1
-b = 1
-theta = np.pi / 4
+class Parameters():
+    def __init__(self, a=1, b=1, theta=np.pi / 2):
+        self.a = a
+        self.b = b
+        self.theta = theta
+
+
+    def __repr__(self):
+        return f"a={self.a},b={self.b},theta={self.theta:.2f}"
+
+
+    def matrix(self):
+        return np.array([[self.a, self.b * np.cos(self.theta)],
+                         [0,      self.b * np.sin(self.theta)]])
+    
+
+    def transform(self, x):
+        return self.matrix() @ x[:gdim]
+
+
+parameters = Parameters()
 
 nu = PETSc.ScalarType(1.) # NOTE Kinematic viscocity (say Water)
 rho = PETSc.ScalarType(1.) # NOTE Density (say Water)
@@ -23,15 +42,15 @@ rho = PETSc.ScalarType(1.) # NOTE Density (say Water)
 # Creating the mesh
 gmsh.initialize()
 
-mesh_size = 0.04
+mesh_size = 0.1 # 0.04
 gdim = 2 # dimension of the model
 
 gmsh.model.add("parallelogram")
 
 A = gmsh.model.geo.addPoint(0, 0, 0, mesh_size)
-B = gmsh.model.geo.addPoint(a, 0, 0, mesh_size)
-C = gmsh.model.geo.addPoint(b * np.cos(theta) + a, b * np.sin(theta), 0, mesh_size)
-D = gmsh.model.geo.addPoint(b * np.cos(theta), b * np.sin(theta), 0, mesh_size)
+B = gmsh.model.geo.addPoint(parameters.a, 0, 0, mesh_size)
+C = gmsh.model.geo.addPoint(parameters.b * np.cos(parameters.theta) + parameters.a, parameters.b * np.sin(parameters.theta), 0, mesh_size)
+D = gmsh.model.geo.addPoint(parameters.b * np.cos(parameters.theta), parameters.b * np.sin(parameters.theta), 0, mesh_size)
 
 AB = gmsh.model.geo.addLine(A, B)
 BC = gmsh.model.geo.addLine(B, C)
@@ -121,27 +140,37 @@ ksp.setFromOptions()
 # TODO Try different solvers and change number of mesh points and number of processes
 
 log.set_log_level(log.LogLevel.INFO)
-n, converged = solver.solve(w_trial)
-assert (converged)
-print(f"Number of interations: {n:d}")
 
-# Saving the result
-results_folder = Path("results")
-results_folder.mkdir(exist_ok=True, parents=True)
+parameters_array = [Parameters(), Parameters(1, 1, np.pi/6), Parameters(1, 2, np.pi/6), Parameters(1, 1, np.pi/4)]
+for parameters in parameters_array:
+    # Deform mesh
+    with HarmonicMeshMotion(mesh, 
+                    facet_markers, 
+                    [wall_marker, lid_marker], 
+                    [parameters.transform, parameters.transform], 
+                    reset_reference=True, 
+                    is_deformation=False):
+        n, converged = solver.solve(w_trial)
+        assert (converged)
+        print(f"Number of interations: {n:d} \t W_trial: {np.max(np.abs(w_trial.x.array))}")
 
-V_interp = fem.VectorFunctionSpace(mesh, ("Lagrange", 1))
-u_interp = fem.Function(V_interp)
-u_expr = fem.Expression(w_trial.sub(0).collapse(), V_interp.element.interpolation_points())
-u_interp.interpolate(u_expr)
- 
-filename = results_folder / "lid_driven_cavity_flow_velocity" # NOTE filename for velocity
- 
-with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-     xdmf.write_mesh(mesh)
-     xdmf.write_function(u_interp)
+        # Saving the result
+        results_folder = Path("results", str(parameters))
+        results_folder.mkdir(exist_ok=True, parents=True)
 
-filename = results_folder / "lid_driven_cavity_flow_pressure" # NOTE filename for pressure
+        V_interp = fem.VectorFunctionSpace(mesh, ("Lagrange", 1))
+        u_interp = fem.Function(V_interp)
+        u_expr = fem.Expression(w_trial.sub(0).collapse(), V_interp.element.interpolation_points())
+        u_interp.interpolate(u_expr)
+        
+        filename = results_folder / "lid_driven_cavity_flow_velocity" # NOTE filename for velocity
+        
+        with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+            xdmf.write_mesh(mesh)
+            xdmf.write_function(u_interp)
 
-with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-     xdmf.write_mesh(mesh)
-     xdmf.write_function(w_trial.sub(1).collapse())
+        filename = results_folder / "lid_driven_cavity_flow_pressure" # NOTE filename for pressure
+
+        with io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+            xdmf.write_mesh(mesh)
+            xdmf.write_function(w_trial.sub(1).collapse())
