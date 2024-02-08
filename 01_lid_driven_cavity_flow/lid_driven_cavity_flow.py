@@ -107,8 +107,8 @@ class ProblemOnDeformedDomain():
         ksp = solver.krylov_solver
         opts = PETSc.Options()
         option_prefix = ksp.getOptionsPrefix()
-        opts[f"{option_prefix}ksp_type"] = "bcgs" # NOTE "preonly"
-        opts[f"{option_prefix}pc_type"] = "none" # NOTE "lu"
+        opts[f"{option_prefix}ksp_type"] = "preonly"# NOTE "bcgs" "preonly"
+        opts[f"{option_prefix}pc_type"] = "lu" # NOTE "none" "lu"
         ksp.setFromOptions()
 
 

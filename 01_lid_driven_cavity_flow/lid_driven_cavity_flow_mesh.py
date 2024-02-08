@@ -30,7 +30,7 @@ parameters = Parameters()
 # Creating the mesh
 gmsh.initialize()
 
-mesh_size = 0.1 # 0.04
+mesh_size = 0.05 # 0.04
 
 gmsh.model.add("parallelogram")
 
