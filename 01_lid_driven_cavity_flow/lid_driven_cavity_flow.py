@@ -14,6 +14,8 @@ from matplotlib import pyplot as plt
 from pathlib import Path
 from itertools import product
 
+# TODO consider just importing both of these from parameters in mesh (would require putting the if __name__ __main__)
+fluid_marker, lid_marker, wall_marker = 1, 2, 3
 class Parameters():
     def __init__(self, a=1, b=1, theta=np.pi / 2, nu=PETSc.ScalarType(1.), rho=PETSc.ScalarType(1.)):
         self.a = a
@@ -43,9 +45,7 @@ class ProblemOnDeformedDomain():
         self.gdim = self._mesh.geometry.dim
         self._subdomains = subdomains # NOTE cell_markers
         self._boundaries = boundaries # NOTE facet_markers
-        self.meshDeformationContext = meshDeformationContext # TODO obsolete
-
-        self._fluid_marker, self._lid_marker, self._wall_marker = 1, 2, 3
+        self.meshDeformationContext = meshDeformationContext
 
         # Function spaces
         P2 = ufl.VectorElement("Lagrange", self._mesh.ufl_cell(), 2)
@@ -66,11 +66,11 @@ class ProblemOnDeformedDomain():
         # No-slip walls
         u_nonslip = dolfinx.fem.Function(self._V)
         u_nonslip.interpolate(lambda x: (np.zeros_like(x[0]), np.zeros_like(x[1])))
-        bcu_walls = dolfinx.fem.dirichletbc(u_nonslip, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(self._wall_marker)), self._W.sub(0))
+        bcu_walls = dolfinx.fem.dirichletbc(u_nonslip, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(wall_marker)), self._W.sub(0))
         # Driving lid
         u_lid = dolfinx.fem.Function(self._V)
         u_lid.interpolate(lambda x: (np.ones(x[0].shape), np.zeros(x[1].shape)))
-        bcu_lid = dolfinx.fem.dirichletbc(u_lid, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(self._lid_marker)), self._W.sub(0))
+        bcu_lid = dolfinx.fem.dirichletbc(u_lid, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(lid_marker)), self._W.sub(0))
 
         # Pressure
         def bottom_left(x):
@@ -115,11 +115,12 @@ class ProblemOnDeformedDomain():
         ksp.setFromOptions()
 
 
-    def interpolated_velocity(self, solution_u, parameters):
-        with  HarmonicMeshMotion(self._mesh, 
+    def interpolated_velocity(self, solution_u):
+        assert(self.parameters is not None)
+        with  self.meshDeformationContext(self._mesh, 
                     self._boundaries, 
-                    [self._wall_marker, self._lid_marker], 
-                    [parameters.transform, parameters.transform], 
+                    [wall_marker, lid_marker], 
+                    [self.parameters.transform, self.parameters.transform], 
                     reset_reference=True, 
                     is_deformation=True):
             V_interp = dolfinx.fem.VectorFunctionSpace(self._mesh, ("Lagrange", 1))
@@ -130,17 +131,18 @@ class ProblemOnDeformedDomain():
             return interpolated_u
     
 
-    def save_results(self, solution_vel, solution_p, parameters):
+    def save_results(self, solution_vel, solution_p):
+        assert(self.parameters is not None)
         results_folder = Path("results")
         results_folder.mkdir(exist_ok=True, parents=True)
 
         filename_pressure = results_folder / "lid_driven_cavity_flow_pressure"
         filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
 
-        with  HarmonicMeshMotion(self._mesh, 
+        with  self.meshDeformationContext(self._mesh, 
                     self._boundaries, 
-                    [self._wall_marker, self._lid_marker], 
-                    [parameters.transform, parameters.transform], 
+                    [wall_marker, lid_marker], 
+                    [self.parameters.transform, self.parameters.transform], 
                     reset_reference=True, 
                     is_deformation=True):
             with dolfinx.io.XDMFFile(self._mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
@@ -153,9 +155,11 @@ class ProblemOnDeformedDomain():
     
 
     def solve(self, parameters=Parameters()):
-         with  HarmonicMeshMotion(self._mesh, 
+        self.parameters = parameters
+
+        with  self.meshDeformationContext(self._mesh, 
                     self._boundaries, 
-                    [self._wall_marker, self._lid_marker], 
+                    [wall_marker, lid_marker], 
                     [parameters.transform, parameters.transform], 
                     reset_reference=True, 
                     is_deformation=False):
@@ -194,7 +198,7 @@ problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
                                              HarmonicMeshMotion)
 
 solution_u, solution_p = problem_parametric.solve(parameters)
-problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u, parameters), solution_p, parameters)
+problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u), solution_p)
 
 
 # POD
