@@ -1,15 +1,18 @@
 from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
 from dolfinx.nls.petsc import NewtonSolver
 
+import rbnicsx.io, rbnicsx.backends
 import dolfinx
 import ufl
-
-import numpy as np
 
 from mpi4py import MPI
 from petsc4py import PETSc
 
+import numpy as np
+from matplotlib import pyplot as plt
+
 from pathlib import Path
+from itertools import product
 
 class Parameters():
     def __init__(self, a=1, b=1, theta=np.pi / 2, nu=PETSc.ScalarType(1.), rho=PETSc.ScalarType(1.)):
@@ -167,7 +170,7 @@ class ProblemOnDeformedDomain():
             solver = NewtonSolver(MPI.COMM_WORLD, problem)
             self.set_solver_options(solver)
 
-            dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO)
+            # dolfinx.log.set_log_level(dolfinx.log.LogLevel.INFO)
 
             n, converged = solver.solve(w_trial)
 
@@ -192,3 +195,91 @@ problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
 
 solution_u, solution_p = problem_parametric.solve(parameters)
 problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u, parameters), solution_p, parameters)
+
+
+# POD
+
+def generate_training_set(samples=[5, 5, 5]):
+    training_set_0 = np.linspace(0.5, 2.5, samples[0])
+    training_set_1 = np.linspace(0.5, 2.5, samples[1])
+    training_set_2 = np.linspace(np.pi/2, np.pi/10, samples[2])
+    training_set = np.array(list(product(training_set_0,
+                                        training_set_1,
+                                        training_set_2)))
+    return training_set
+
+
+training_set = rbnicsx.io.on_rank_zero(mesh.comm, generate_training_set)
+
+Nmax = 100 # the number of basis functions
+
+print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
+print("")
+
+print("set up snapshots matrix")
+snapshots_u_matrix = rbnicsx.backends.FunctionsList(problem_parametric._V)
+snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
+
+print("")
+
+for (params_index, values) in enumerate(training_set):
+    print(rbnicsx.io.TextLine(str(params_index+1), fill="#"))
+
+    params = Parameters(*values)
+    print("Parameter number ", (params_index+1), "of", training_set.shape[0])
+    print("high fidelity solve for params =", params)
+    snapshot_u, snapshot_p = problem_parametric.solve(params)
+
+    print("update snapshots matrix")
+    snapshots_u_matrix.append(snapshot_u)
+    snapshots_p_matrix.append(snapshot_p)
+
+    print("")
+    
+def inner_product_action(fun_j):
+        def _(fun_i):
+            return fun_i.vector.dot(fun_j.vector)
+        return _
+
+print(rbnicsx.io.TextLine("perform POD", fill="#"))
+eigenvalues_u, modes_u, _ = \
+    rbnicsx.backends.\
+    proper_orthogonal_decomposition(snapshots_u_matrix,
+                                    inner_product_action,
+                                    N=Nmax, tol=1.e-6)
+
+eigenvalues_p, modes_p, _ = \
+    rbnicsx.backends.\
+    proper_orthogonal_decomposition(snapshots_p_matrix,
+                                    inner_product_action,
+                                    N=Nmax, tol=1.e-6)
+
+print(rbnicsx.io.TextBox("POD-Galerkin offline phase ends", fill="="))
+
+def plot_eigenvalue_decay(ax, eigenvalues, modes, title):
+    positive_eigenvalues = np.where(eigenvalues > 0., eigenvalues, np.nan)
+    singular_values = np.sqrt(positive_eigenvalues)
+
+    xint = list()
+    yval = list()
+
+    for x, y in enumerate(eigenvalues[:len(modes)]):
+        yval.append(y)
+        xint.append(x+1)
+
+    ax.plot(xint, yval, "^-", color="tab:blue")
+    ax.set_xlabel("Eigenvalue number", fontsize=18)
+    ax.set_ylabel("Eigenvalue", fontsize=18)
+    ax.set_xticks(xint)
+    ax.tick_params(axis='x', which='major', labelsize=8)
+    ax.set_yscale("log")
+    ax.set_title(f"{title}", fontsize=24)
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 10))
+plot_eigenvalue_decay(ax1, eigenvalues_u, modes_u, "Velocity eigenvalues decay")
+plot_eigenvalue_decay(ax2, eigenvalues_p, modes_p, "Pressure eigenvalues decay")
+plt.tight_layout()
+plt.savefig("eigenvalue_decay.png", dpi=300)
+    
+
+# POD Ends ###
