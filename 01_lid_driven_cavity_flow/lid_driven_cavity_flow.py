@@ -1,7 +1,7 @@
 from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
 from dolfinx.nls.petsc import NewtonSolver
 
-import rbnicsx.io, rbnicsx.backends
+import rbnicsx.io, rbnicsx.backends, rbnicsx.online
 import dolfinx
 import ufl
 
@@ -184,6 +184,111 @@ class ProblemOnDeformedDomain():
             return solution_u, solution_p
 
 
+class PODANNReducedProblem():
+    def __init__(self, full_problem):
+        self._full_problem = full_problem
+        self._basis_functions_u = rbnicsx.backends.FunctionsList(self._full_problem._V)
+        self._basis_functions_p = rbnicsx.backends.FunctionsList(self._full_problem._Q)
+
+
+    # TODO look at the difference between using different norms
+    # TODO look at using a different norm for u and p
+    def _inner_product_action(self, fun_j):
+        def _(fun_i):
+            return fun_i.vector.dot(fun_j.vector)
+        return _
+
+
+    def compute_norm(self, function):
+        return np.sqrt(self._inner_product_action(function)(function))
+    
+
+    def norm_error(self, reference_value, value):
+        # TODO handle in a more elegant way
+        absolute_error = dolfinx.fem.Function(self._full_problem._V)
+        absolute_error.x.array[:] = reference_value.x.array - value.x.array
+        # absolute_error = value - reference_value
+        return self.compute_norm(absolute_error)/self.compute_norm(reference_value)
+
+
+    # TODO combine handling u and p in an elegant way
+    def rb_dimension_u(self):
+        return len(self._basis_functions_u)
+    
+
+    def rb_dimension_p(self):
+        return len(self._basis_functions_p)
+    
+
+    def project_snapshot_u(self, solution, N):
+        # TODO ask to go over what happens here
+        projected_snapshot = rbnicsx.online.create_vector(N)
+        A = rbnicsx.backends.\
+            project_matrix(self._inner_product_action,
+                           self._basis_functions_u[:N])
+        F = rbnicsx.backends.\
+            project_vector(self._inner_product_action(solution),
+                           self._basis_functions_u[:N])
+        ksp = PETSc.KSP()
+        ksp.create(projected_snapshot.comm)
+        ksp.setOperators(A)
+        ksp.setType("preonly")
+        ksp.getPC().setType("lu")
+        ksp.setFromOptions()
+        ksp.solve(F, projected_snapshot)
+        return projected_snapshot
+    
+
+    def project_snapshot_p(self, solution, N):
+        projected_snapshot = rbnicsx.online.create_vector(N)
+        A = rbnicsx.backends.\
+            project_matrix(self._inner_product_action,
+                           self._basis_functions_p[:N])
+        F = rbnicsx.backends.\
+            project_vector(self._inner_product_action(solution),
+                           self._basis_functions_p[:N])
+        ksp = PETSc.KSP()
+        ksp.create(projected_snapshot.comm)
+        ksp.setOperators(A)
+        ksp.setType("preonly")
+        ksp.getPC().setType("lu")
+        ksp.setFromOptions()
+        ksp.solve(F, projected_snapshot)
+        return projected_snapshot
+
+
+    def project_snapshot_u_deformed_context(self, solution, N):
+        """Project snapshot on the reduced basis space"""
+        with self._full_problem.meshDeformationContext(self._full_problem._mesh, 
+                    self._full_problem._boundaries, 
+                    [wall_marker, lid_marker], 
+                    [self._full_problem.parameters.transform, self._full_problem.parameters.transform], 
+                    reset_reference=True, 
+                    is_deformation=True):
+            return self.project_snapshot_u(solution, N)
+        
+
+    def project_snapshot_p_deformed_context(self, solution, N):
+        """Project snapshot on the reduced basis space"""
+        with self._full_problem.meshDeformationContext(self._full_problem._mesh, 
+                    self._full_problem._boundaries, 
+                    [wall_marker, lid_marker], 
+                    [self._full_problem.parameters.transform, self._full_problem.parameters.transform], 
+                    reset_reference=True, 
+                    is_deformation=True):
+            return self.project_snapshot_p(solution, N)
+
+
+    def reconstruct_solution_u(self, reduced_solution):
+        """Reconstruct a RB projection of a snapshot back to high fidelity space"""
+        return self._basis_functions_u[:reduced_solution.size] * reduced_solution
+
+
+    def reconstruct_solution_p(self, reduced_solution):
+        """Reconstruct a RB projection of a snapshot back to high fidelity space"""
+        return self._basis_functions_p[:reduced_solution.size] * reduced_solution
+
+
 comm = MPI.COMM_WORLD
 gdim = 2 # dimension of the model
 gmsh_model_rank = 0
@@ -192,14 +297,8 @@ mesh, cell_tags, facet_tags = \
     dolfinx.io.gmshio.read_from_msh("mesh.msh", comm,
                                     gmsh_model_rank, gdim=gdim)
 
-# FEM solve
-parameters = Parameters(theta=np.pi/6, a=2)
 problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
                                              HarmonicMeshMotion)
-
-solution_u, solution_p = problem_parametric.solve(parameters)
-problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u), solution_p)
-
 
 # POD
 
@@ -239,24 +338,26 @@ for (params_index, values) in enumerate(training_set):
     snapshots_p_matrix.append(snapshot_p)
 
     print("")
-    
-def inner_product_action(fun_j):
-        def _(fun_i):
-            return fun_i.vector.dot(fun_j.vector)
-        return _
+
+print("set up reduced problem")
+reduced_problem = PODANNReducedProblem(problem_parametric)
 
 print(rbnicsx.io.TextLine("perform POD", fill="#"))
 eigenvalues_u, modes_u, _ = \
     rbnicsx.backends.\
     proper_orthogonal_decomposition(snapshots_u_matrix,
-                                    inner_product_action,
+                                    reduced_problem._inner_product_action,
                                     N=Nmax, tol=1.e-6)
 
 eigenvalues_p, modes_p, _ = \
     rbnicsx.backends.\
     proper_orthogonal_decomposition(snapshots_p_matrix,
-                                    inner_product_action,
+                                    reduced_problem._inner_product_action,
                                     N=Nmax, tol=1.e-6)
+
+reduced_problem._basis_functions_u.extend(modes_u)
+reduced_problem._basis_functions_p.extend(modes_p)
+print("")
 
 print(rbnicsx.io.TextBox("POD-Galerkin offline phase ends", fill="="))
 
@@ -285,5 +386,44 @@ plot_eigenvalue_decay(ax2, eigenvalues_p, modes_p, "Pressure eigenvalues decay")
 plt.tight_layout()
 plt.savefig("eigenvalue_decay.png", dpi=300)
     
-
 # POD Ends ###
+
+# FEM solve
+parameters = Parameters(theta=np.pi/6, a=2)
+
+solution_u, solution_p = problem_parametric.solve(parameters)
+problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u), solution_p)
+
+with  HarmonicMeshMotion(mesh, 
+                    facet_tags, 
+                    [wall_marker, lid_marker], 
+                    [parameters.transform, parameters.transform], 
+                    reset_reference=True, 
+                    is_deformation=False) as mesh_class:
+    rb_test_solution_u = reduced_problem.project_snapshot_u(solution_u, reduced_problem.rb_dimension_u())
+    rb_test_solution_p = reduced_problem.project_snapshot_p(solution_p, reduced_problem.rb_dimension_p())
+
+    fem_recreated_solution_u = reduced_problem.reconstruct_solution_u(rb_test_solution_u)
+    fem_recreated_solution_p = reduced_problem.reconstruct_solution_p(rb_test_solution_p)
+
+    print(f"Velocity relative error norm on the deformed mesh = {reduced_problem.norm_error(solution_u, fem_recreated_solution_u)}")
+    # print(f"Pressure relative error norm on the deformed mesh = {reduced_problem.norm_error(solution_p, fem_recreated_solution_p)}")
+
+print(f"Velocity relative error norm on the reference mesh = {reduced_problem.norm_error(solution_u, fem_recreated_solution_u)}")
+# print(f"Pressure relative error norm on the reference mesh = {reduced_problem.norm_error(solution_p, fem_recreated_solution_p)}")
+
+#     norm_recreated_solution_u =\
+#         mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution_u, fem_recreated_solution_u)*ufl.dx)), op=MPI.SUM)
+#     norm_recreated_solution_p =\
+#         mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution_p, fem_recreated_solution_p)*ufl.dx)), op=MPI.SUM)
+
+#     print(f"Norm of recreated velocity solution, calculated on deformed domain = {norm_recreated_solution_u}")
+#     print(f"Norm of recreated pressure solution, calculated on deformed domain = {norm_recreated_solution_p}")
+
+# norm_recreated_solution_u =\
+#     mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution_u, fem_recreated_solution_u)*ufl.dx)), op=MPI.SUM)
+# norm_recreated_solution_p =\
+#     mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution_p, fem_recreated_solution_p)*ufl.dx)), op=MPI.SUM)
+
+# print(f"Norm of recreated velocity solution, calculated on deformed domain = {norm_recreated_solution_u}")
+# print(f"Norm of recreated pressure solution, calculated on deformed domain = {norm_recreated_solution_p}")
