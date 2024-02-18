@@ -1,3 +1,5 @@
+from lid_driven_cavity_flow_mesh import Parameters, fluid_marker, lid_marker, wall_marker
+
 from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
 from dolfinx.nls.petsc import NewtonSolver
 
@@ -13,29 +15,6 @@ from matplotlib import pyplot as plt
 
 from pathlib import Path
 from itertools import product
-
-# TODO consider just importing both of these from parameters in mesh (would require putting the if __name__ __main__)
-fluid_marker, lid_marker, wall_marker = 1, 2, 3
-class Parameters():
-    def __init__(self, a=1, b=1, theta=np.pi / 2, nu=PETSc.ScalarType(1.), rho=PETSc.ScalarType(1.)):
-        self.a = a
-        self.b = b
-        self.theta = theta
-        self.nu = nu # NOTE Kinematic viscocity
-        self.rho = rho # NOTE Density
-
-
-    def __repr__(self):
-        return f"a={self.a},b={self.b},theta={self.theta:.2f},nu={self.nu:.2f},rho={self.rho:.2f}"
-
-
-    def matrix(self):
-        return np.array([[self.a, self.b * np.cos(self.theta)],
-                         [0,      self.b * np.sin(self.theta)]])
-    
-
-    def transform(self, x):
-        return self.matrix() @ x[:gdim]
 
 
 class ProblemOnDeformedDomain():
