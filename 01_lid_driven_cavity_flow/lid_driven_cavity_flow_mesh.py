@@ -16,6 +16,14 @@ class Parameters():
 
     def __repr__(self):
         return f"a={self.a},b={self.b},theta={self.theta:.2f},nu={self.nu:.2f},rho={self.rho:.2f}"
+    
+
+    def to_numpy(self):
+        return np.array([self.a, self.b, self.theta, float(self.nu), float(self.rho)])
+    
+
+    def __len__(self):
+        return len(self.to_numpy())
 
 
     def matrix(self):
