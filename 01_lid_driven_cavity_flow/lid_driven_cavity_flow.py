@@ -164,6 +164,14 @@ class ProblemOnDeformedDomain():
             solution_p = w_trial.sub(1).collapse()
 
             return solution_u, solution_p
+        
+
+    def get_dofs(self):
+        # dofs * block size (for vector valued functions, vector dimensions in each dof)
+        u_dofs = self._V.dofmap.index_map.size_global * self._V.dofmap.index_map_bs
+        p_dofs = self._Q.dofmap.index_map.size_global * self._Q.dofmap.index_map_bs
+
+        return u_dofs, p_dofs
 
 
 class PODANNReducedProblem():
@@ -196,12 +204,14 @@ class PODANNReducedProblem():
         self._basis_functions.extend(functions)
 
 
-    # TODO combine handling u and p in an elegant way
     def rb_dimension(self):
         return len(self._basis_functions)
     
 
-    def project_snapshot(self, solution, N):
+    def project_snapshot(self, solution, N=None):
+        if N is None:
+            N = self.rb_dimension()
+
         projected_snapshot = rbnicsx.online.create_vector(N)
         A = rbnicsx.backends.\
             project_matrix(self._inner_product_action,
@@ -235,132 +245,139 @@ class PODANNReducedProblem():
         return self._basis_functions[:reduced_solution.size] * reduced_solution
 
 
-comm = MPI.COMM_WORLD
-gdim = 2 # dimension of the model
-gmsh_model_rank = 0
+if __name__ == "__main__":
+    comm = MPI.COMM_WORLD
+    gdim = 2 # dimension of the model
+    gmsh_model_rank = 0
 
-mesh, cell_tags, facet_tags = \
-    dolfinx.io.gmshio.read_from_msh("mesh.msh", comm,
-                                    gmsh_model_rank, gdim=gdim)
+    mesh, cell_tags, facet_tags = \
+        dolfinx.io.gmshio.read_from_msh("mesh.msh", comm,
+                                        gmsh_model_rank, gdim=gdim)
 
-problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
-                                             HarmonicMeshMotion)
+    problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
+                                                HarmonicMeshMotion)
 
-# POD
+    problem_parametric.get_dofs()
 
-def generate_training_set(samples=[5, 5, 5]):
-    training_set_0 = np.linspace(0.5, 2.5, samples[0])
-    training_set_1 = np.linspace(0.5, 2.5, samples[1])
-    training_set_2 = np.linspace(np.pi/2, np.pi/10, samples[2])
-    training_set = np.array(list(product(training_set_0,
-                                        training_set_1,
-                                        training_set_2)))
-    return training_set
+    # POD
+
+    def generate_training_set(samples=[5, 5, 5]):
+        training_set_0 = np.linspace(0.5, 2.5, samples[0])
+        training_set_1 = np.linspace(0.5, 2.5, samples[1])
+        training_set_2 = np.linspace(np.pi/2, np.pi/10, samples[2])
+        training_set = np.array(list(product(training_set_0,
+                                            training_set_1,
+                                            training_set_2)))
+        return training_set
 
 
-training_set = rbnicsx.io.on_rank_zero(mesh.comm, generate_training_set)
+    training_set = rbnicsx.io.on_rank_zero(mesh.comm, generate_training_set)
 
-Nmax = 100 # the number of basis functions
+    Nmax = 100 # the number of basis functions
 
-print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
-print("")
+    print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
+    print("")
 
-print("set up snapshots matrix")
-snapshots_u_matrix = rbnicsx.backends.FunctionsList(problem_parametric._V)
-snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
-
-print("")
-
-for (params_index, values) in enumerate(training_set):
-    print(rbnicsx.io.TextLine(str(params_index+1), fill="#"))
-
-    params = Parameters(*values)
-    print("Parameter number ", (params_index+1), "of", training_set.shape[0])
-    print("high fidelity solve for params =", params)
-    snapshot_u, snapshot_p = problem_parametric.solve(params)
-
-    print("update snapshots matrix")
-    snapshots_u_matrix.append(snapshot_u)
-    snapshots_p_matrix.append(snapshot_p)
+    print("set up snapshots matrix")
+    snapshots_u_matrix = rbnicsx.backends.FunctionsList(problem_parametric._V)
+    snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
 
     print("")
 
-print("set up reduced problem")
-reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
-reduced_problem_p = PODANNReducedProblem(problem_parametric, problem_parametric._Q)
+    for (params_index, values) in enumerate(training_set):
+        print(rbnicsx.io.TextLine(str(params_index+1), fill="#"))
 
-print(rbnicsx.io.TextLine("perform POD", fill="#"))
-eigenvalues_u, modes_u, _ = \
-    rbnicsx.backends.\
-    proper_orthogonal_decomposition(snapshots_u_matrix,
-                                    reduced_problem_u._inner_product_action,
-                                    N=Nmax, tol=1.e-6)
+        params = Parameters(*values)
+        print("Parameter number ", (params_index+1), "of", training_set.shape[0])
+        print("high fidelity solve for params =", params)
+        snapshot_u, snapshot_p = problem_parametric.solve(params)
 
-eigenvalues_p, modes_p, _ = \
-    rbnicsx.backends.\
-    proper_orthogonal_decomposition(snapshots_p_matrix,
-                                    reduced_problem_p._inner_product_action,
-                                    N=Nmax, tol=1.e-6)
+        print("update snapshots matrix")
+        snapshots_u_matrix.append(snapshot_u)
+        snapshots_p_matrix.append(snapshot_p)
 
-reduced_problem_u.set_reduced_basis(modes_u)
-reduced_problem_p.set_reduced_basis(modes_p)
-print("")
+        print("")
 
-print(rbnicsx.io.TextBox("POD-Galerkin offline phase ends", fill="="))
+    print("set up reduced problem")
+    reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
+    reduced_problem_p = PODANNReducedProblem(problem_parametric, problem_parametric._Q)
 
-def plot_eigenvalue_decay(ax, eigenvalues, modes, title):
-    positive_eigenvalues = np.where(eigenvalues > 0., eigenvalues, np.nan)
-    singular_values = np.sqrt(positive_eigenvalues)
+    print(rbnicsx.io.TextLine("perform POD", fill="#"))
+    eigenvalues_u, modes_u, _ = \
+        rbnicsx.backends.\
+        proper_orthogonal_decomposition(snapshots_u_matrix,
+                                        reduced_problem_u._inner_product_action,
+                                        N=Nmax, tol=1.e-6)
 
-    xint = list()
-    yval = list()
+    eigenvalues_p, modes_p, _ = \
+        rbnicsx.backends.\
+        proper_orthogonal_decomposition(snapshots_p_matrix,
+                                        reduced_problem_p._inner_product_action,
+                                        N=Nmax, tol=1.e-6)
 
-    for x, y in enumerate(eigenvalues[:len(modes)]):
-        yval.append(y)
-        xint.append(x+1)
+    reduced_problem_u.set_reduced_basis(modes_u)
+    reduced_problem_p.set_reduced_basis(modes_p)
+    print("")
 
-    ax.plot(xint, yval, "^-", color="tab:blue")
-    ax.set_xlabel("Eigenvalue number", fontsize=18)
-    ax.set_ylabel("Eigenvalue", fontsize=18)
-    ax.set_xticks(xint)
-    ax.tick_params(axis='x', which='major', labelsize=8)
-    ax.set_yscale("log")
-    ax.set_title(f"{title}", fontsize=24)
+    print(rbnicsx.io.TextBox("POD-Galerkin offline phase ends", fill="="))
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 10))
-plot_eigenvalue_decay(ax1, eigenvalues_u, modes_u, "Velocity eigenvalues decay")
-plot_eigenvalue_decay(ax2, eigenvalues_p, modes_p, "Pressure eigenvalues decay")
-plt.tight_layout()
-plt.savefig("eigenvalue_decay.png", dpi=300)
-    
-# POD Ends ###
+    def plot_eigenvalue_decay(ax, eigenvalues, modes, title):
+        positive_eigenvalues = np.where(eigenvalues > 0., eigenvalues, np.nan)
+        singular_values = np.sqrt(positive_eigenvalues)
 
-# FEM solve
-parameters = Parameters(theta=np.pi/6, a=2)
+        xint = list()
+        yval = list()
 
-solution_u, solution_p = problem_parametric.solve(parameters)
-problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u), solution_p)
+        for x, y in enumerate(eigenvalues[:len(modes)]):
+            yval.append(y)
+            xint.append(x+1)
 
-for str, reduced_problem, solution in (("Velocity", reduced_problem_u, solution_u),
-                                       ("Pressure", reduced_problem_p, solution_p)):
-    with  HarmonicMeshMotion(mesh, 
-                        facet_tags, 
-                        [wall_marker, lid_marker], 
-                        [parameters.transform, parameters.transform], 
-                        reset_reference=True, 
-                        is_deformation=False) as mesh_class:
-        rb_test_solution = reduced_problem.project_snapshot(solution, reduced_problem.rb_dimension())
+        ax.plot(xint, yval, "^-", color="tab:blue")
+        ax.set_xlabel("Eigenvalue number", fontsize=18)
+        ax.set_ylabel("Eigenvalue", fontsize=18)
+        ax.set_xticks(xint)
+        ax.tick_params(axis='x', which='major', labelsize=8)
+        ax.set_yscale("log")
+        ax.set_title(f"{title}", fontsize=24)
 
-        fem_recreated_solution = reduced_problem.reconstruct_solution(rb_test_solution)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 10))
+    plot_eigenvalue_decay(ax1, eigenvalues_u, modes_u, "Velocity eigenvalues decay")
+    plot_eigenvalue_decay(ax2, eigenvalues_p, modes_p, "Pressure eigenvalues decay")
+    plt.tight_layout()
+    plt.savefig("eigenvalue_decay.png", dpi=300)
+        
+    # POD Ends ###
 
-        print(f"{str} relative error norm on the deformed mesh = {reduced_problem.norm_error(solution, fem_recreated_solution)}")
+    # FEM solve
+    parameters = Parameters(theta=np.pi/6, a=2)
 
-    print(f"{str} relative error norm on the reference mesh = {reduced_problem.norm_error(solution, fem_recreated_solution)}")
+    solution_u, solution_p = problem_parametric.solve(parameters)
+    problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u), solution_p)
 
-    #     norm_recreated_solution =\
-    #         mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution, fem_recreated_solution)*ufl.dx)), op=MPI.SUM)
-    #     print(f"Norm of recreated {str} solution, calculated on deformed domain = {norm_recreated_solution}")
+    for str, reduced_problem, solution in (("Velocity", reduced_problem_u, solution_u),
+                                        ("Pressure", reduced_problem_p, solution_p)):
+        with  HarmonicMeshMotion(mesh, 
+                            facet_tags, 
+                            [wall_marker, lid_marker], 
+                            [parameters.transform, parameters.transform], 
+                            reset_reference=True, 
+                            is_deformation=False) as mesh_class:
+            rb_test_solution = reduced_problem.project_snapshot(solution, reduced_problem.rb_dimension())
 
-    # norm_recreated_solution =\
-    #     mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution, fem_recreated_solution)*ufl.dx)), op=MPI.SUM)
-    # print(f"Norm of recreated {str} solution, calculated on reference domain = {norm_recreated_solution}")
+            fem_recreated_solution = reduced_problem.reconstruct_solution(rb_test_solution)
+
+            print(f"{str} relative error norm on the deformed mesh = {reduced_problem.norm_error(solution, fem_recreated_solution)}")
+
+        print(f"{str} relative error norm on the reference mesh = {reduced_problem.norm_error(solution, fem_recreated_solution)}")
+
+        #     norm_recreated_solution =\
+        #         mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution, fem_recreated_solution)*ufl.dx)), op=MPI.SUM)
+        #     print(f"Norm of recreated {str} solution, calculated on deformed domain = {norm_recreated_solution}")
+
+        # norm_recreated_solution =\
+        #     mesh.comm.allreduce(dolfinx.fem.assemble_scalar(dolfinx.fem.form(ufl.inner(fem_recreated_solution, fem_recreated_solution)*ufl.dx)), op=MPI.SUM)
+        # print(f"Norm of recreated {str} solution, calculated on reference domain = {norm_recreated_solution}")
+
+# TODO can visualize the RB by taking a vector with all zeros, and one corresponding to the chosen basis, project it to the original space, and plot?
+# TODO visualize the solution reconstrued from a varying number of Rb functions (project on RB dim 1, RB dim 5, RB dim 10, RB dim 44 and compare)
+        
