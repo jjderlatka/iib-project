@@ -1,5 +1,10 @@
 # https://jsdokken.com/dolfinx-tutorial/chapter2/ns_code2.html#mesh-generation
 
+from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
+
+import dolfinx.io
+from pathlib import Path
+
 import gmsh
 
 from mpi4py import MPI
@@ -22,9 +27,48 @@ class Parameters():
         self.mu = PETSc.ScalarType(mu)       # NOTE Dynamic viscosity
         self.rho = PETSc.ScalarType(rho)     # NOTE Density
 
+# NOTE all transformations assume a rectangle with lower left corner at (0, -H/2)
+def inlet_transform(target=Parameters()):
+    def _inlet_transform(x):
+        reference = Parameters()
+        return (x[0] * 0., (x[1]/reference.H) * (target.H - reference.H))
+
+    return _inlet_transform
+
+
+def outlet_transform(target=Parameters()):
+    def _outlet_transform(x):
+        reference = Parameters()
+        return ((x[0]/reference.L) * (target.L - reference.L), (x[1]/reference.H) * (target.H - reference.H))
+
+    return _outlet_transform
+
+
+def wall_transform(target=Parameters()):
+    def _wall_transform(x):
+        reference = Parameters()
+        return ((x[0]/reference.L) * (target.L - reference.L), (x[1]/reference.H) * (target.H - reference.H))
+
+    return _wall_transform
+
+
+def obstacle_transform(target=Parameters()):
+    def _obstacle_transform(x):
+        reference = Parameters()
+
+        absolute_target_c_x, absolute_target_c_y = target.c_x, - target.H/2 + target.c_y
+        absolute_reference_c_x, absolute_reference_c_y = reference.c_x, - reference.H/2 + reference.c_y
+
+        dx = (absolute_target_c_x - absolute_reference_c_x) + (target.r / reference.r - 1) * (x[0] - absolute_reference_c_x)
+        dy = (absolute_target_c_y - absolute_reference_c_y) + (target.r / reference.r - 1) * (x[1] - absolute_reference_c_y)
+        return (dx, dy)
+
+    return _obstacle_transform
+
+
 def gerenate_mesh(parameters, file_name):
-    rectangle = gmsh.model.occ.addRectangle(0, 0, 0, parameters.L, parameters.H, tag=1)
-    obstacle = gmsh.model.occ.addDisk(parameters.c_x, parameters.c_y, 0, parameters.r, parameters.r)
+    rectangle = gmsh.model.occ.addRectangle(0, -parameters.H/2, 0, parameters.L, parameters.H, tag=1)
+    obstacle = gmsh.model.occ.addDisk(parameters.c_x, -parameters.H/2 + parameters.c_y, 0, parameters.r, parameters.r)
 
     fluid = gmsh.model.occ.cut([(gdim, rectangle)], [(gdim, obstacle)])
     gmsh.model.occ.synchronize()
@@ -39,11 +83,11 @@ def gerenate_mesh(parameters, file_name):
     boundaries = gmsh.model.getBoundary(volumes, oriented=False)
     for boundary in boundaries:
         center_of_mass = gmsh.model.occ.getCenterOfMass(boundary[0], boundary[1])
-        if np.allclose(center_of_mass, [0, parameters.H / 2, 0]):
+        if np.allclose(center_of_mass, [0, 0, 0]):
             inflow.append(boundary[1])
-        elif np.allclose(center_of_mass, [parameters.L, parameters.H / 2, 0]):
+        elif np.allclose(center_of_mass, [parameters.L, 0, 0]):
             outflow.append(boundary[1])
-        elif np.allclose(center_of_mass, [parameters.L / 2, parameters.H, 0]) or np.allclose(center_of_mass, [parameters.L / 2, 0, 0]):
+        elif np.allclose(center_of_mass, [parameters.L / 2, parameters.H/2, 0]) or np.allclose(center_of_mass, [parameters.L / 2, -parameters.H/2, 0]):
             walls.append(boundary[1])
         else:
             obstacle.append(boundary[1])
@@ -89,6 +133,38 @@ def gerenate_mesh(parameters, file_name):
     gmsh.write(file_name)
 
 
+def mesh_xdmf():
+    comm = MPI.COMM_WORLD
+    gdim = 2 # dimension of the model
+    gmsh_model_rank = 0
+
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", comm, gmsh_model_rank, gdim=gdim)
+
+    results_folder = Path("results")
+    results_folder.mkdir(exist_ok=True, parents=True)
+    filename = results_folder / "obstacle_mesh"
+    with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+        xdmf.write_mesh(mesh)
+
+
+def deformed_mesh_xdmf():
+    comm = MPI.COMM_WORLD
+    gdim = 2 # dimension of the model
+    gmsh_model_rank = 0
+
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", comm, gmsh_model_rank, gdim=gdim)
+
+    results_folder = Path("results")
+    results_folder.mkdir(exist_ok=True, parents=True)
+    filename = results_folder / "obstacle_mesh_deformed"
+
+    print("Attempting to deform the mesh")
+    p = Parameters(r=0.1, c_x=0.4, c_y=0.25) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
+    with HarmonicMeshMotion(mesh, facet_tags, [inlet_marker, outlet_marker, wall_marker, obstacle_marker], [inlet_transform(p), outlet_transform(p), wall_transform(p), obstacle_transform(p)], reset_reference=True, is_deformation=True):
+        with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+            xdmf.write_mesh(mesh)
+
+
 if __name__ == "__main__":
     gdim = 2
     mesh_comm = MPI.COMM_WORLD
@@ -100,3 +176,5 @@ if __name__ == "__main__":
     gmsh.initialize()
     if mesh_comm.rank == model_rank:
         gerenate_mesh(parameters, file_name)
+        mesh_xdmf()
+        deformed_mesh_xdmf()
