@@ -27,33 +27,39 @@ class Parameters():
         self.mu = PETSc.ScalarType(mu)       # NOTE Dynamic viscosity
         self.rho = PETSc.ScalarType(rho)     # NOTE Density
 
-# NOTE all transformations assume a rectangle with lower left corner at (0, -H/2)
-def inlet_transform(target=Parameters()):
-    def _inlet_transform(x):
+    # NOTE all transformations assume a rectangle with lower left corner at (0, -H/2)
+    def inlet_transform(self, x):
+        target=self
         reference = Parameters()
-        return (x[0] * 0., (x[1]/reference.H) * (target.H - reference.H))
+        
+        dx = x[0] * 0.
+        dy = (x[1]/reference.H) * (target.H - reference.H)
 
-    return _inlet_transform
+        return (dx, dy)
 
 
-def outlet_transform(target=Parameters()):
-    def _outlet_transform(x):
+    def outlet_transform(self, x):
+        target=self
         reference = Parameters()
-        return ((x[0]/reference.L) * (target.L - reference.L), (x[1]/reference.H) * (target.H - reference.H))
 
-    return _outlet_transform
+        dx = (x[0]/reference.L) * (target.L - reference.L)
+        dy = (x[1]/reference.H) * (target.H - reference.H)
+
+        return (dx, dy)
 
 
-def wall_transform(target=Parameters()):
-    def _wall_transform(x):
+    def wall_transform(self, x):
+        target=self
         reference = Parameters()
-        return ((x[0]/reference.L) * (target.L - reference.L), (x[1]/reference.H) * (target.H - reference.H))
 
-    return _wall_transform
+        dx = (x[0]/reference.L) * (target.L - reference.L)
+        dy = (x[1]/reference.H) * (target.H - reference.H)
+
+        return (dx, dy)
 
 
-def obstacle_transform(target=Parameters()):
-    def _obstacle_transform(x):
+    def obstacle_transform(self, x):
+        target=self
         reference = Parameters()
 
         absolute_target_c_x, absolute_target_c_y = target.c_x, - target.H/2 + target.c_y
@@ -61,9 +67,8 @@ def obstacle_transform(target=Parameters()):
 
         dx = (absolute_target_c_x - absolute_reference_c_x) + (target.r / reference.r - 1) * (x[0] - absolute_reference_c_x)
         dy = (absolute_target_c_y - absolute_reference_c_y) + (target.r / reference.r - 1) * (x[1] - absolute_reference_c_y)
+        
         return (dx, dy)
-
-    return _obstacle_transform
 
 
 def gerenate_mesh(parameters, file_name):
@@ -159,8 +164,8 @@ def deformed_mesh_xdmf():
     filename = results_folder / "obstacle_mesh_deformed"
 
     print("Attempting to deform the mesh")
-    p = Parameters(r=0.1, c_x=0.4, c_y=0.25) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
-    with HarmonicMeshMotion(mesh, facet_tags, [inlet_marker, outlet_marker, wall_marker, obstacle_marker], [inlet_transform(p), outlet_transform(p), wall_transform(p), obstacle_transform(p)], reset_reference=True, is_deformation=True):
+    p = Parameters(H=1, r=0.1, c_x=0.4, c_y=0.5) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
+    with HarmonicMeshMotion(mesh, facet_tags, [inlet_marker, outlet_marker, wall_marker, obstacle_marker], [p.inlet_transform, p.outlet_transform, p.wall_transform, p.obstacle_transform], reset_reference=True, is_deformation=True):
         with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
             xdmf.write_mesh(mesh)
 
