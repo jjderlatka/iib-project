@@ -2,6 +2,9 @@ from lid_driven_cavity_flow_mesh import Parameters, fluid_marker, lid_marker, wa
 from lid_driven_cavity_flow import ProblemOnDeformedDomain, PODANNReducedProblem
 
 from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
+from dlrbnicsx.neural_network.neural_network import HiddenLayersNet
+from dlrbnicsx.activation_function.activation_function_factory import Tanh
+from dlrbnicsx.train_validate_test.train_validate_test import train_nn, validate_nn
 
 import dolfinx
 import rbnicsx.io
@@ -57,6 +60,7 @@ Nmax = 100 # the number of basis functions
 print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
 print("")
 
+# TODO All below could be enclosed in a loop
 print("set up snapshots matrix")
 snapshots_u_matrix = rbnicsx.backends.FunctionsList(problem_parametric._V)
 snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
@@ -173,26 +177,7 @@ input_size = len(Parameters())
 output_size = reduced_problem_u.rb_dimension()
 print(f"NN {input_size=}, {output_size=}")
 
-# ToDo parametrize the architecture as a list of layer sizes, so its easier to optimize
-# Define model
-class NeuralNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.linear_relu_stack = nn.Sequential(
-            nn.Linear(input_size, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, output_size)
-        )
-
-
-    def forward(self, params):
-        logits = self.linear_relu_stack(params)
-        return logits
-
-
-model = NeuralNetwork().to(device)
+model = HiddenLayersNet(input_size, [512, 512], output_size, Tanh()).to(device)
 # TODO remove 
 model.double() # Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
 print(model)
@@ -201,48 +186,14 @@ print(model)
 loss_fn = nn.MSELoss()
 optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
 
-
-def train(dataloader, model, loss_fn, optimizer):
-    size = len(dataloader.dataset)
-    model.train()
-    for batch, (X, y) in enumerate(dataloader):
-        X, y = X.to(device), y.to(device)
-
-        # Compute prediction error
-        pred = model(X)
-        loss = loss_fn(pred, y)
-
-        # Backpropagation
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-
-        if batch % 1 == 0:
-            loss, current = loss.item(), (batch + 1) * len(X)
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-
-
-def test(dataloader, model, loss_fn):
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
-    model.eval()
-    test_loss, correct = 0, 0
-    with torch.no_grad():
-        for X, y in dataloader:
-            X, y = X.to(device), y.to(device)
-            pred = model(X)
-
-            test_loss += loss_fn(pred, y).item()
-    test_loss /= num_batches
-    print(f"Test Error: \n Avg loss: {test_loss:>8f} \n")
-
 ## NN training
 # TODO plot the evolution with number of epochs
 epochs = 10
 for t in range(epochs):
     print(f"Epoch {t+1}\n-------------------------------")
-    train(train_dataloader, model, loss_fn, optimizer)
-    test(test_dataloader, model, loss_fn)
+    # TODO make a pull request removing reduced_problem argument from these functions
+    train_nn(_, train_dataloader, model, loss_fn, optimizer)
+    validate_nn(_, test_dataloader, model, loss_fn)
 print("Done!")
 
 
@@ -252,6 +203,7 @@ X = torch.tensor(p.to_numpy())
 rb_pred = model(X)
 rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy())
 
+# TODO make a pull request adding the option to supply solution to error analysis function
 with  HarmonicMeshMotion(mesh, 
                             facet_tags, 
                             [wall_marker, lid_marker], 
