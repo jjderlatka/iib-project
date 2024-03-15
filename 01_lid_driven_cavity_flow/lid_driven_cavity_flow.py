@@ -82,7 +82,9 @@ class ProblemOnDeformedDomain():
     
 
     def configure_solver(self, problem):
-        solver = NewtonSolver(MPI.COMM_WORLD, problem)
+        # TODO ask about how exactly it would look like if this was mismatched, how is that used? How does the solving process in general look line, when the mesh is distributed?
+        # Before I changed this, it consistently failed, but only on the 115 parameter, regardless of the number of processes.
+        solver = NewtonSolver(self._mesh.comm, problem)
 
         solver.convergence_criterion = "incremental"
         solver.rtol = 1e-6

@@ -21,13 +21,131 @@ from pathlib import Path
 
 import numpy as np
 
+# TODO probably remove
+np.random.seed(0)
+
+def mpi_print(s):
+    print(f"[Rank {MPI.COMM_WORLD.Get_rank()}]: {s}")
+
+# TODO implementing __setstate__ and __getstate__ would data to be pickled and therefore bcasted and gathered easily
+def gather_functions_list(functions_list, root_rank=0):
+    function_space = functions_list.function_space
+
+    coefficients = []
+    for func in functions_list:
+        # TODO: could be removing copied functions from the original functions_list, but FunctionsList class doesn't have any method for removing other than erasing all
+        coefficients.append(func.vector[:])
+    
+    coefficients = MPI.COMM_WORLD.gather(coefficients, root=root_rank)
+
+    if MPI.COMM_WORLD.Get_rank() == root_rank:
+        coefficients = np.concatenate(coefficients, axis=0)
+
+        functions_list = rbnicsx.backends.FunctionsList(function_space)
+        for (i, snapshot) in enumerate(coefficients):
+            func = dolfinx.fem.Function(function_space)
+            func.vector.setArray(snapshot)
+            functions_list.append(func)
+
+        return functions_list
+    
+    else:
+        return None
+    
+
+def bcast_functions_list(functions_list, function_space, root_rank=0):
+    coefficients = []
+
+    if MPI.COMM_WORLD.Get_rank() == root_rank:
+        assert(functions_list.function_space is function_space)
+        for func in functions_list:
+            coefficients.append(func.vector[:])
+
+    coefficients = MPI.COMM_WORLD.bcast(coefficients, root=root_rank)
+
+    functions_list = rbnicsx.backends.FunctionsList(function_space)
+    for (i, snapshot) in enumerate(coefficients):
+        func = dolfinx.fem.Function(function_space)
+        func.vector.setArray(snapshot)
+        functions_list.append(func)
+
+    return functions_list
+
+
+def save_functions_list(functions_list, path):
+    coefficients = []
+
+    for func in functions_list:
+        coefficients.append(func.vector[:])
+
+    np.save(path, np.array(coefficients))
+
+
+def load_functions_list(functions_list, path):
+    coefficients = np.load(path)
+
+    for snapshot in coefficients:
+        func = dolfinx.fem.Function(functions_list.function_space)
+        func.vector.setArray(snapshot)
+        functions_list.append(func)
+
+    return functions_list
+
+
+def assert_functions_lists_equal(a, b):
+    assert(np.shape(a)==np.shape(b))
+
+    for a_i, b_i in zip(a, b):
+        assert((a_i.vector[:] == b_i.vector[:]).all())
+
+
+def verify_list_against_cache(functions_list, filename):
+    cache_dir = Path("results/cache")
+    file_path = cache_dir / filename
+
+    if not cache_dir.exists():
+        cache_dir.mkdir(parents=True)
+
+    if not file_path.exists():
+        print(f"No cached {filename} found. Saving current ones.")
+        save_functions_list(functions_list, file_path)
+    
+    else:
+        print(f"Found cached {filename}, loading.")
+        cached_functions_list = functions_list.duplicate()
+        load_functions_list(cached_functions_list, file_path)
+        print(f"Comparing cached snapshots with current ones.")
+        assert_functions_lists_equal(cached_functions_list, functions_list)
+        print(f"Matched.")
+
+
+def verify_array_against_cache(array, filename):
+    cache_dir = Path("results/cache")
+    file_path = cache_dir / filename
+
+    if not cache_dir.exists():
+        cache_dir.mkdir(parents=True)
+
+    if not file_path.exists():
+        print(f"No cached {filename} found. Saving current ones.")
+        np.save(file_path, array)
+    
+    else:
+        print(f"Found cached snapshots, loading.")
+        cached_array = np.load(file_path)
+        print(f"Comparing cached snapshots with current ones.")
+        assert((cached_array == array).all())
+        print(f"Matched.")
+
+
 comm = MPI.COMM_WORLD
 gdim = 2 # dimension of the model
-gmsh_model_rank = 0
 
 mesh, cell_tags, facet_tags = \
-    dolfinx.io.gmshio.read_from_msh("mesh.msh", comm,
-                                    gmsh_model_rank, gdim=gdim)
+    dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=gdim)
+
+mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
+mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
 
 problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
                                              HarmonicMeshMotion)
@@ -36,10 +154,9 @@ problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
 # 2. Generate training data (parameters -> Reduced basis solution)
 # 3. Train the NN on the data
 
-
 # POD
 
-def generate_parameters_values_list(samples=[5, 5, 5]):
+def generate_parameters_values_list(samples=[3, 3, 3]):
     training_set_0 = np.linspace(0.5, 2.5, samples[0])
     training_set_1 = np.linspace(0.5, 2.5, samples[1])
     training_set_2 = np.linspace(np.pi/2, np.pi/10, samples[2])
@@ -53,7 +170,8 @@ def generate_parameters_list(parameteres_values):
     return np.array([Parameters(*vals) for vals in parameteres_values])
 
 
-training_set = rbnicsx.io.on_rank_zero(mesh.comm, lambda x=[5, 5, 5]: generate_parameters_list(generate_parameters_values_list(x)))
+# TODO ask: why waste time broadcasting this set to every rank, if each can generate it itself in very few operations
+global_training_set = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
 
 Nmax = 100 # the number of basis functions
 
@@ -67,35 +185,65 @@ snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
 
 print("")
 
-for (params_index, params) in enumerate(training_set):
-    print(rbnicsx.io.TextLine(str(params_index+1), fill="#"))
+# TODO discuss: what are the benefits or choosing every 10th vs continous sections of 10. Any caching benefit? Any way to use the similarity between solving similar solutions? Maybe iterative methods could use the solution to neighbouring parameter as the starting point?
+# TODO not necessarily helpful atm, as LU is used (am I right?) But maybe could switch to a different solver, slower for one solve, but faster for a range of them
 
-    print("Parameter number ", (params_index+1), "of", training_set.shape[0])
+# TODO ask: why do dolfinx and rbnicsx have the two level interface? Each function calls its backend version
+my_training_set = np.array_split(global_training_set, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+# mpi_print(my_training_set)
+# TODO priority first: make a function for solving a for many parameters, with the distributed option, in the original class
+ 
+for (params_index, params) in enumerate(my_training_set):
+    print(rbnicsx.io.TextLine(f"{params_index+1} of {my_training_set.shape[0]}", fill="#"))
     print("high fidelity solve for params =", params)
     snapshot_u, snapshot_p = problem_parametric.solve(params)
 
-    print("update snapshots matrix")
     snapshots_u_matrix.append(snapshot_u)
     snapshots_p_matrix.append(snapshot_p)
 
-    print("")
+mpi_print(f"Rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
+
+snapshots_u_matrix = gather_functions_list(snapshots_u_matrix, 0)
+snapshots_p_matrix = gather_functions_list(snapshots_p_matrix, 0)
+
+mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_u_matrix)} snapshots.")
+mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
+
+if MPI.COMM_WORLD.Get_rank() == 0:
+    verify_list_against_cache(snapshots_u_matrix, "snapshots_u_matrix.npy")
+    verify_list_against_cache(snapshots_p_matrix, "snapshots_p_matrix.npy")
 
 print("set up reduced problem")
 reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
 reduced_problem_p = PODANNReducedProblem(problem_parametric, problem_parametric._Q)
 
-print(rbnicsx.io.TextLine("perform POD", fill="#"))
-eigenvalues_u, modes_u, _ = \
-    rbnicsx.backends.\
-    proper_orthogonal_decomposition(snapshots_u_matrix,
-                                    reduced_problem_u._inner_product_action,
-                                    N=Nmax, tol=1.e-6)
+# NOTE POD parallelization
+# correlation matrix assembly could be paralalleized
 
-eigenvalues_p, modes_p, _ = \
-    rbnicsx.backends.\
-    proper_orthogonal_decomposition(snapshots_p_matrix,
-                                    reduced_problem_p._inner_product_action,
-                                    N=Nmax, tol=1.e-6)
+if MPI.COMM_WORLD.Get_rank() == 0:
+    print(rbnicsx.io.TextLine("perform POD", fill="#"))
+    eigenvalues_u, modes_u, _ = \
+        rbnicsx.backends.\
+        proper_orthogonal_decomposition(snapshots_u_matrix,
+                                        reduced_problem_u._inner_product_action,
+                                        N=Nmax, tol=1.e-6)
+
+    eigenvalues_p, modes_p, _ = \
+        rbnicsx.backends.\
+        proper_orthogonal_decomposition(snapshots_p_matrix,
+                                        reduced_problem_p._inner_product_action,
+                                        N=Nmax, tol=1.e-6)
+    
+else:
+    eigenvalues_u, modes_u = None, None
+    eigenvalues_p, modes_p = None, None
+
+eigenvalues_u, modes_u = MPI.COMM_WORLD.bcast(eigenvalues_u, root=0), bcast_functions_list(modes_u, problem_parametric._V, 0)
+eigenvalues_p, modes_p = MPI.COMM_WORLD.bcast(eigenvalues_p, root=0), bcast_functions_list(modes_p, problem_parametric._Q, 0)
+
+if MPI.COMM_WORLD.Get_rank() == 0:
+    verify_list_against_cache(modes_u, "modes_u.npy")
+    verify_list_against_cache(modes_p, "modes_p.npy")
 
 reduced_problem_u.set_reduced_basis(modes_u)
 reduced_problem_p.set_reduced_basis(modes_p)
@@ -118,13 +266,13 @@ class CustomDataset(Dataset):
 
 
 def generate_rb_solutions_list(parameters_set):
-    rb_snapshots_u_matrix = np.empty((len(parameters_set), reduced_problem_u.rb_dimension()))
-    rb_snapshots_p_matrix = np.empty((len(parameters_set), reduced_problem_p.rb_dimension()))
+    my_parameters_set = np.array_split(parameters_set, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
 
-    for (params_index, params) in enumerate(parameters_set):
-        print(rbnicsx.io.TextLine(str(params_index+1), fill="#"))
+    rb_snapshots_u_matrix = np.empty((len(my_parameters_set), reduced_problem_u.rb_dimension()))
+    rb_snapshots_p_matrix = np.empty((len(my_parameters_set), reduced_problem_p.rb_dimension()))
 
-        print("Parameter number ", (params_index+1), "of", len(parameters_set))
+    for (params_index, params) in enumerate(my_parameters_set):
+        print(rbnicsx.io.TextLine(f"{params_index+1} of {len(my_parameters_set)}", fill="#"))
         print("high fidelity solve for params =", params)
         snapshot_u, snapshot_p = problem_parametric.solve(params)
 
@@ -135,14 +283,29 @@ def generate_rb_solutions_list(parameters_set):
         rb_snapshots_p_matrix[params_index, :] = rb_snapshot_p
 
     print("")
+
+    rb_snapshots_u_matrix = MPI.COMM_WORLD.gather(rb_snapshots_u_matrix, 0)
+    rb_snapshots_p_matrix = MPI.COMM_WORLD.gather(rb_snapshots_p_matrix, 0)
+    
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        rb_snapshots_u_matrix = np.concatenate(rb_snapshots_u_matrix, axis=0)
+        rb_snapshots_p_matrix = np.concatenate(rb_snapshots_p_matrix, axis=0)
+
+    rb_snapshots_u_matrix = MPI.COMM_WORLD.bcast(rb_snapshots_u_matrix, 0)
+    rb_snapshots_p_matrix = MPI.COMM_WORLD.bcast(rb_snapshots_p_matrix, 0)
+
     return rb_snapshots_u_matrix, rb_snapshots_p_matrix
 
 
 def prepare_test_and_training_sets():
-    paramteres_list_ = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
+    paramteres_list_ = generate_parameters_list(generate_parameters_values_list([4, 4, 4]))
+    
     np.random.shuffle(paramteres_list_)
     solutions_list_u, solutions_list_p = generate_rb_solutions_list(paramteres_list_)
-    print(f"{np.shape(solutions_list_u)=}")
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        verify_array_against_cache(solutions_list_u, "solutions_list_u.npy")
+        verify_array_against_cache(solutions_list_p, "solutions_list_p.npy")
 
     num_training_samples = int(0.7 * len(paramteres_list_))
     num_validation_samples = len(paramteres_list_) - num_training_samples
@@ -192,8 +355,8 @@ epochs = 10
 for t in range(epochs):
     print(f"Epoch {t+1}\n-------------------------------")
     # TODO make a pull request removing reduced_problem argument from these functions
-    train_nn(_, train_dataloader, model, loss_fn, optimizer)
-    validate_nn(_, test_dataloader, model, loss_fn)
+    train_nn(None, train_dataloader, model, loss_fn, optimizer)
+    validate_nn(None, test_dataloader, model, loss_fn)
 print("Done!")
 
 
@@ -201,7 +364,8 @@ print("Done!")
 p = Parameters(1.21, 1.37, np.pi/4*1.01)
 X = torch.tensor(p.to_numpy())
 rb_pred = model(X)
-rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy())
+# TODO: ask why it didn't work without specyfing the communicator? How did it know
+rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
 
 # TODO make a pull request adding the option to supply solution to error analysis function
 with  HarmonicMeshMotion(mesh, 
@@ -220,7 +384,7 @@ with  HarmonicMeshMotion(mesh,
     results_folder = Path("results")
     results_folder.mkdir(exist_ok=True, parents=True)
     filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
-    with dolfinx.io.XDMFFile(comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
+    with dolfinx.io.XDMFFile(mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
         xdmf.write_mesh(mesh)
         xdmf.write_function(interpolated_pred)
 
