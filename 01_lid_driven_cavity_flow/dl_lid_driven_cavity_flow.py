@@ -72,72 +72,6 @@ def bcast_functions_list(functions_list, function_space, root_rank=0):
     return functions_list
 
 
-def save_functions_list(functions_list, path):
-    coefficients = []
-
-    for func in functions_list:
-        coefficients.append(func.vector[:])
-
-    np.save(path, np.array(coefficients))
-
-
-def load_functions_list(functions_list, path):
-    coefficients = np.load(path)
-
-    for snapshot in coefficients:
-        func = dolfinx.fem.Function(functions_list.function_space)
-        func.vector.setArray(snapshot)
-        functions_list.append(func)
-
-    return functions_list
-
-
-def assert_functions_lists_equal(a, b):
-    assert(np.shape(a)==np.shape(b))
-
-    for a_i, b_i in zip(a, b):
-        assert((a_i.vector[:] == b_i.vector[:]).all())
-
-
-def verify_list_against_cache(functions_list, filename):
-    cache_dir = Path("results/cache")
-    file_path = cache_dir / filename
-
-    if not cache_dir.exists():
-        cache_dir.mkdir(parents=True)
-
-    if not file_path.exists():
-        print(f"No cached {filename} found. Saving current ones.")
-        save_functions_list(functions_list, file_path)
-    
-    else:
-        print(f"Found cached {filename}, loading.")
-        cached_functions_list = functions_list.duplicate()
-        load_functions_list(cached_functions_list, file_path)
-        print(f"Comparing cached snapshots with current ones.")
-        assert_functions_lists_equal(cached_functions_list, functions_list)
-        print(f"Matched.")
-
-
-def verify_array_against_cache(array, filename):
-    cache_dir = Path("results/cache")
-    file_path = cache_dir / filename
-
-    if not cache_dir.exists():
-        cache_dir.mkdir(parents=True)
-
-    if not file_path.exists():
-        print(f"No cached {filename} found. Saving current ones.")
-        np.save(file_path, array)
-    
-    else:
-        print(f"Found cached snapshots, loading.")
-        cached_array = np.load(file_path)
-        print(f"Comparing cached snapshots with current ones.")
-        assert((cached_array == array).all())
-        print(f"Matched.")
-
-
 comm = MPI.COMM_WORLD
 gdim = 2 # dimension of the model
 
@@ -149,10 +83,6 @@ mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
 
 problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
                                              HarmonicMeshMotion)
-
-# 1. Generate Reduced basis with POD
-# 2. Generate training data (parameters -> Reduced basis solution)
-# 3. Train the NN on the data
 
 # POD
 
@@ -176,14 +106,11 @@ global_training_set = generate_parameters_list(generate_parameters_values_list([
 Nmax = 100 # the number of basis functions
 
 print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
-print("")
 
 # TODO All below could be enclosed in a loop
 print("set up snapshots matrix")
 snapshots_u_matrix = rbnicsx.backends.FunctionsList(problem_parametric._V)
 snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
-
-print("")
 
 # TODO discuss: what are the benefits or choosing every 10th vs continous sections of 10. Any caching benefit? Any way to use the similarity between solving similar solutions? Maybe iterative methods could use the solution to neighbouring parameter as the starting point?
 # TODO not necessarily helpful atm, as LU is used (am I right?) But maybe could switch to a different solver, slower for one solve, but faster for a range of them
@@ -208,10 +135,6 @@ snapshots_p_matrix = gather_functions_list(snapshots_p_matrix, 0)
 
 mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_u_matrix)} snapshots.")
 mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
-
-if MPI.COMM_WORLD.Get_rank() == 0:
-    verify_list_against_cache(snapshots_u_matrix, "snapshots_u_matrix.npy")
-    verify_list_against_cache(snapshots_p_matrix, "snapshots_p_matrix.npy")
 
 print("set up reduced problem")
 reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
@@ -241,13 +164,8 @@ else:
 eigenvalues_u, modes_u = MPI.COMM_WORLD.bcast(eigenvalues_u, root=0), bcast_functions_list(modes_u, problem_parametric._V, 0)
 eigenvalues_p, modes_p = MPI.COMM_WORLD.bcast(eigenvalues_p, root=0), bcast_functions_list(modes_p, problem_parametric._Q, 0)
 
-if MPI.COMM_WORLD.Get_rank() == 0:
-    verify_list_against_cache(modes_u, "modes_u.npy")
-    verify_list_against_cache(modes_p, "modes_p.npy")
-
 reduced_problem_u.set_reduced_basis(modes_u)
 reduced_problem_p.set_reduced_basis(modes_p)
-print("")
 
 # Generate training data
 class CustomDataset(Dataset):
@@ -302,10 +220,6 @@ def prepare_test_and_training_sets():
     
     np.random.shuffle(paramteres_list_)
     solutions_list_u, solutions_list_p = generate_rb_solutions_list(paramteres_list_)
-
-    if MPI.COMM_WORLD.Get_rank() == 0:
-        verify_array_against_cache(solutions_list_u, "solutions_list_u.npy")
-        verify_array_against_cache(solutions_list_p, "solutions_list_p.npy")
 
     num_training_samples = int(0.7 * len(paramteres_list_))
     num_validation_samples = len(paramteres_list_) - num_training_samples
