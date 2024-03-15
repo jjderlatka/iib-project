@@ -16,13 +16,28 @@ from torch.utils.data import Dataset, DataLoader
 
 from mpi4py import MPI
 
+import pickle
 from itertools import product
 from pathlib import Path
+from time import process_time_ns
 
 import numpy as np
 
-# TODO probably remove
-np.random.seed(0)
+
+class Timer:
+    def __init__(self):
+        self.__start_time = process_time_ns()
+        self.__timestamps = {}
+
+    
+    def timestamp(self, label):
+        assert(label not in self.__timestamps)
+        timestamp = process_time_ns() - self.__start_time
+        self.__timestamps[label] = timestamp
+
+
+    def get_timestamps(self):
+        return self.__timestamps
 
 
 class CustomDataset(Dataset):
@@ -89,7 +104,7 @@ def bcast_functions_list(functions_list, function_space, root_rank=0):
     return functions_list
 
 
-def generate_parameters_values_list(samples=[3, 3, 3]):
+def generate_parameters_values_list(samples):
     training_set_0 = np.linspace(0.5, 2.5, samples[0])
     training_set_1 = np.linspace(0.5, 2.5, samples[1])
     training_set_2 = np.linspace(np.pi/2, np.pi/10, samples[2])
@@ -135,8 +150,8 @@ def generate_rb_solutions_list(parameters_set):
     return rb_snapshots_u_matrix, rb_snapshots_p_matrix
 
 
-def prepare_test_and_training_sets():
-    paramteres_list_ = generate_parameters_list(generate_parameters_values_list([4, 4, 4]))
+def prepare_test_and_training_sets(samples):
+    paramteres_list_ = generate_parameters_list(generate_parameters_values_list(samples))
     
     np.random.shuffle(paramteres_list_)
     solutions_list_u, solutions_list_p = generate_rb_solutions_list(paramteres_list_)
@@ -161,12 +176,39 @@ def prepare_test_and_training_sets():
     return training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p
 
 
+def save_all_timestamps(timer, root_rank=0):
+    timestamps = timer.get_timestamps()
+    timestamps = MPI.COMM_WORLD.gather(timestamps, root_rank)
+    
+    if MPI.COMM_WORLD.Get_rank() == root_rank:
+        results_folder = Path("results")
+        file_path = results_folder / 'timing.pkl'
+
+        if file_path.exists():
+            with open(file_path, 'rb') as f:
+                all_results = pickle.load(f)
+        else:
+            all_results = {}
+        
+        all_results[MPI.COMM_WORLD.Get_size()] = timestamps
+        
+        with open(file_path, 'wb') as f:
+            pickle.dump(all_results, f)
+
+
 if __name__ == "__main__":
+    timer = Timer()
+    
+    # TODO probably remove
+    np.random.seed(0)
+
     comm = MPI.COMM_WORLD
     gdim = 2 # dimension of the model
 
     mesh, cell_tags, facet_tags = \
         dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=gdim)
+    
+    timer.timestamp("Mesh loaded")
 
     mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
     mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
@@ -177,7 +219,7 @@ if __name__ == "__main__":
     # POD
 
     # TODO ask: why waste time broadcasting this set to every rank, if each can generate it itself in very few operations
-    global_training_set = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
+    global_training_set = generate_parameters_list(generate_parameters_values_list([6, 6, 6]))
 
     Nmax = 100 # the number of basis functions
 
@@ -208,6 +250,8 @@ if __name__ == "__main__":
 
     snapshots_u_matrix = gather_functions_list(snapshots_u_matrix, 0)
     snapshots_p_matrix = gather_functions_list(snapshots_p_matrix, 0)
+
+    timer.timestamp("POD training set calculated")
 
     mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_u_matrix)} snapshots.")
     mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
@@ -243,66 +287,75 @@ if __name__ == "__main__":
     reduced_problem_u.set_reduced_basis(modes_u)
     reduced_problem_p.set_reduced_basis(modes_p)
 
+    timer.timestamp("Reduced basis calculated")
+
     # Generate training data
-    training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p = prepare_test_and_training_sets()
+    training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p = prepare_test_and_training_sets([6, 6, 6])
 
-    device = "cpu"
+    timer.timestamp("NN dataset calculated")
 
-    # u only to begin with
-    batch_size = 64 # TODO increase
-    train_dataloader = DataLoader(training_dataset_u, batch_size=batch_size)
-    test_dataloader = DataLoader(validation_dataset_u, batch_size=batch_size)
+    if MPI.COMM_WORLD.Get_rank() == 0:
 
-    input_size = len(Parameters())
-    output_size = reduced_problem_u.rb_dimension()
-    print(f"NN {input_size=}, {output_size=}")
+        device = "cpu"
 
-    model = HiddenLayersNet(input_size, [512, 512], output_size, Tanh()).to(device)
-    # TODO remove 
-    model.double() # Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
-    print(model)
+        # u only to begin with
+        batch_size = 64 # TODO increase
+        train_dataloader = DataLoader(training_dataset_u, batch_size=batch_size)
+        test_dataloader = DataLoader(validation_dataset_u, batch_size=batch_size)
 
-    # TODO investigate the loss function
-    loss_fn = nn.MSELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+        input_size = len(Parameters())
+        output_size = reduced_problem_u.rb_dimension()
+        print(f"NN {input_size=}, {output_size=}")
 
-    ## NN training
-    # TODO plot the evolution with number of epochs
-    epochs = 10
-    for t in range(epochs):
-        print(f"Epoch {t+1}\n-------------------------------")
-        # TODO make a pull request removing reduced_problem argument from these functions
-        train_nn(None, train_dataloader, model, loss_fn, optimizer)
-        validate_nn(None, test_dataloader, model, loss_fn)
-    print("Done!")
+        model = HiddenLayersNet(input_size, [512, 512], output_size, Tanh()).to(device)
+        # TODO remove 
+        model.double() # Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
+        print(model)
 
+        # TODO investigate the loss function
+        loss_fn = nn.MSELoss()
+        optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
 
-    # Infer solution and save it
-    p = Parameters(1.21, 1.37, np.pi/4*1.01)
-    X = torch.tensor(p.to_numpy())
-    rb_pred = model(X)
-    # TODO: ask why it didn't work without specyfing the communicator? How did it know
-    rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
+        ## NN training
+        # TODO plot the evolution with number of epochs
+        epochs = 10
+        for t in range(epochs):
+            print(f"Epoch {t+1}\n-------------------------------")
+            # TODO make a pull request removing reduced_problem argument from these functions
+            train_nn(None, train_dataloader, model, loss_fn, optimizer)
+            validate_nn(None, test_dataloader, model, loss_fn)
+        print("Done!")
 
-    # TODO make a pull request adding the option to supply solution to error analysis function
-    with  HarmonicMeshMotion(mesh, 
-                                facet_tags, 
-                                [wall_marker, lid_marker], 
-                                [p.transform, p.transform], 
-                                reset_reference=True, 
-                                is_deformation=False) as mesh_class:
-        print(f"Projecting the prediction to full basis")
+        timer.timestamp("NN trained")
 
-        full_order_pred = reduced_problem_u.reconstruct_solution(rb_pred_vec)
+        # Infer solution and save it
+        p = Parameters(1.21, 1.37, np.pi/4*1.01)
+        X = torch.tensor(p.to_numpy())
+        rb_pred = model(X)
+        # TODO: ask why it didn't work without specyfing the communicator? How did it know
+        rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
 
-        interpolated_pred = problem_parametric.interpolated_velocity(full_order_pred)
+        # TODO make a pull request adding the option to supply solution to error analysis function
+        with  HarmonicMeshMotion(mesh, 
+                                    facet_tags, 
+                                    [wall_marker, lid_marker], 
+                                    [p.transform, p.transform], 
+                                    reset_reference=True, 
+                                    is_deformation=False) as mesh_class:
+            print(f"Projecting the prediction to full basis")
 
-        print(f"Saving the result")
-        results_folder = Path("results")
-        results_folder.mkdir(exist_ok=True, parents=True)
-        filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
-        with dolfinx.io.XDMFFile(mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
-            xdmf.write_mesh(mesh)
-            xdmf.write_function(interpolated_pred)
+            full_order_pred = reduced_problem_u.reconstruct_solution(rb_pred_vec)
 
-    print("Done")
+            interpolated_pred = problem_parametric.interpolated_velocity(full_order_pred)
+
+            print(f"Saving the result")
+            results_folder = Path("results")
+            results_folder.mkdir(exist_ok=True, parents=True)
+            filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
+            with dolfinx.io.XDMFFile(mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
+                xdmf.write_mesh(mesh)
+                xdmf.write_function(interpolated_pred)
+
+        timer.timestamp("Error analysis completed")
+    
+    save_all_timestamps(timer, 0)
