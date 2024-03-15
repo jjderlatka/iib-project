@@ -24,8 +24,25 @@ import numpy as np
 # TODO probably remove
 np.random.seed(0)
 
+
+class CustomDataset(Dataset):
+    def __init__(self, parameters_list, solutions_list):
+        assert(len(parameters_list) == len(solutions_list))
+        self.parameters = parameters_list
+        self.solutions = solutions_list
+
+
+    def __len__(self):
+        return len(self.parameters)
+
+
+    def __getitem__(self, idx):
+        return self.parameters[idx], self.solutions[idx]
+    
+
 def mpi_print(s):
     print(f"[Rank {MPI.COMM_WORLD.Get_rank()}]: {s}")
+
 
 # TODO implementing __setstate__ and __getstate__ would data to be pickled and therefore bcasted and gathered easily
 def gather_functions_list(functions_list, root_rank=0):
@@ -72,20 +89,6 @@ def bcast_functions_list(functions_list, function_space, root_rank=0):
     return functions_list
 
 
-comm = MPI.COMM_WORLD
-gdim = 2 # dimension of the model
-
-mesh, cell_tags, facet_tags = \
-    dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=gdim)
-
-mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
-mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
-
-problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
-                                             HarmonicMeshMotion)
-
-# POD
-
 def generate_parameters_values_list(samples=[3, 3, 3]):
     training_set_0 = np.linspace(0.5, 2.5, samples[0])
     training_set_1 = np.linspace(0.5, 2.5, samples[1])
@@ -98,89 +101,6 @@ def generate_parameters_values_list(samples=[3, 3, 3]):
 
 def generate_parameters_list(parameteres_values):
     return np.array([Parameters(*vals) for vals in parameteres_values])
-
-
-# TODO ask: why waste time broadcasting this set to every rank, if each can generate it itself in very few operations
-global_training_set = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
-
-Nmax = 100 # the number of basis functions
-
-print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
-
-# TODO All below could be enclosed in a loop
-print("set up snapshots matrix")
-snapshots_u_matrix = rbnicsx.backends.FunctionsList(problem_parametric._V)
-snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
-
-# TODO discuss: what are the benefits or choosing every 10th vs continous sections of 10. Any caching benefit? Any way to use the similarity between solving similar solutions? Maybe iterative methods could use the solution to neighbouring parameter as the starting point?
-# TODO not necessarily helpful atm, as LU is used (am I right?) But maybe could switch to a different solver, slower for one solve, but faster for a range of them
-
-# TODO ask: why do dolfinx and rbnicsx have the two level interface? Each function calls its backend version
-my_training_set = np.array_split(global_training_set, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
-# mpi_print(my_training_set)
-# TODO priority first: make a function for solving a for many parameters, with the distributed option, in the original class
- 
-for (params_index, params) in enumerate(my_training_set):
-    print(rbnicsx.io.TextLine(f"{params_index+1} of {my_training_set.shape[0]}", fill="#"))
-    print("high fidelity solve for params =", params)
-    snapshot_u, snapshot_p = problem_parametric.solve(params)
-
-    snapshots_u_matrix.append(snapshot_u)
-    snapshots_p_matrix.append(snapshot_p)
-
-mpi_print(f"Rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
-
-snapshots_u_matrix = gather_functions_list(snapshots_u_matrix, 0)
-snapshots_p_matrix = gather_functions_list(snapshots_p_matrix, 0)
-
-mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_u_matrix)} snapshots.")
-mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
-
-print("set up reduced problem")
-reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
-reduced_problem_p = PODANNReducedProblem(problem_parametric, problem_parametric._Q)
-
-# NOTE POD parallelization
-# correlation matrix assembly could be paralalleized
-
-if MPI.COMM_WORLD.Get_rank() == 0:
-    print(rbnicsx.io.TextLine("perform POD", fill="#"))
-    eigenvalues_u, modes_u, _ = \
-        rbnicsx.backends.\
-        proper_orthogonal_decomposition(snapshots_u_matrix,
-                                        reduced_problem_u._inner_product_action,
-                                        N=Nmax, tol=1.e-6)
-
-    eigenvalues_p, modes_p, _ = \
-        rbnicsx.backends.\
-        proper_orthogonal_decomposition(snapshots_p_matrix,
-                                        reduced_problem_p._inner_product_action,
-                                        N=Nmax, tol=1.e-6)
-    
-else:
-    eigenvalues_u, modes_u = None, None
-    eigenvalues_p, modes_p = None, None
-
-eigenvalues_u, modes_u = MPI.COMM_WORLD.bcast(eigenvalues_u, root=0), bcast_functions_list(modes_u, problem_parametric._V, 0)
-eigenvalues_p, modes_p = MPI.COMM_WORLD.bcast(eigenvalues_p, root=0), bcast_functions_list(modes_p, problem_parametric._Q, 0)
-
-reduced_problem_u.set_reduced_basis(modes_u)
-reduced_problem_p.set_reduced_basis(modes_p)
-
-# Generate training data
-class CustomDataset(Dataset):
-    def __init__(self, parameters_list, solutions_list):
-        assert(len(parameters_list) == len(solutions_list))
-        self.parameters = parameters_list
-        self.solutions = solutions_list
-
-
-    def __len__(self):
-        return len(self.parameters)
-
-
-    def __getitem__(self, idx):
-        return self.parameters[idx], self.solutions[idx]
 
 
 def generate_rb_solutions_list(parameters_set):
@@ -241,65 +161,148 @@ def prepare_test_and_training_sets():
     return training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p
 
 
-training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p = prepare_test_and_training_sets()
+if __name__ == "__main__":
+    comm = MPI.COMM_WORLD
+    gdim = 2 # dimension of the model
 
-device = "cpu"
+    mesh, cell_tags, facet_tags = \
+        dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=gdim)
 
-# u only to begin with
-batch_size = 64 # TODO increase
-train_dataloader = DataLoader(training_dataset_u, batch_size=batch_size)
-test_dataloader = DataLoader(validation_dataset_u, batch_size=batch_size)
+    mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
+    mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
 
-input_size = len(Parameters())
-output_size = reduced_problem_u.rb_dimension()
-print(f"NN {input_size=}, {output_size=}")
+    problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
+                                                HarmonicMeshMotion)
 
-model = HiddenLayersNet(input_size, [512, 512], output_size, Tanh()).to(device)
-# TODO remove 
-model.double() # Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
-print(model)
+    # POD
 
-# TODO investigate the loss function
-loss_fn = nn.MSELoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+    # TODO ask: why waste time broadcasting this set to every rank, if each can generate it itself in very few operations
+    global_training_set = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
 
-## NN training
-# TODO plot the evolution with number of epochs
-epochs = 10
-for t in range(epochs):
-    print(f"Epoch {t+1}\n-------------------------------")
-    # TODO make a pull request removing reduced_problem argument from these functions
-    train_nn(None, train_dataloader, model, loss_fn, optimizer)
-    validate_nn(None, test_dataloader, model, loss_fn)
-print("Done!")
+    Nmax = 100 # the number of basis functions
+
+    print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
+
+    # TODO All below could be enclosed in a loop
+    print("set up snapshots matrix")
+    snapshots_u_matrix = rbnicsx.backends.FunctionsList(problem_parametric._V)
+    snapshots_p_matrix = rbnicsx.backends.FunctionsList(problem_parametric._Q)
+
+    # TODO discuss: what are the benefits or choosing every 10th vs continous sections of 10. Any caching benefit? Any way to use the similarity between solving similar solutions? Maybe iterative methods could use the solution to neighbouring parameter as the starting point?
+    # TODO not necessarily helpful atm, as LU is used (am I right?) But maybe could switch to a different solver, slower for one solve, but faster for a range of them
+
+    # TODO ask: why do dolfinx and rbnicsx have the two level interface? Each function calls its backend version
+    my_training_set = np.array_split(global_training_set, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+    # mpi_print(my_training_set)
+    # TODO priority first: make a function for solving a for many parameters, with the distributed option, in the original class
+    
+    for (params_index, params) in enumerate(my_training_set):
+        print(rbnicsx.io.TextLine(f"{params_index+1} of {my_training_set.shape[0]}", fill="#"))
+        print("high fidelity solve for params =", params)
+        snapshot_u, snapshot_p = problem_parametric.solve(params)
+
+        snapshots_u_matrix.append(snapshot_u)
+        snapshots_p_matrix.append(snapshot_p)
+
+    mpi_print(f"Rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
+
+    snapshots_u_matrix = gather_functions_list(snapshots_u_matrix, 0)
+    snapshots_p_matrix = gather_functions_list(snapshots_p_matrix, 0)
+
+    mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_u_matrix)} snapshots.")
+    mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
+
+    print("set up reduced problem")
+    reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
+    reduced_problem_p = PODANNReducedProblem(problem_parametric, problem_parametric._Q)
+
+    # NOTE POD parallelization
+    # correlation matrix assembly could be paralalleized
+
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        print(rbnicsx.io.TextLine("perform POD", fill="#"))
+        eigenvalues_u, modes_u, _ = \
+            rbnicsx.backends.\
+            proper_orthogonal_decomposition(snapshots_u_matrix,
+                                            reduced_problem_u._inner_product_action,
+                                            N=Nmax, tol=1.e-6)
+
+        eigenvalues_p, modes_p, _ = \
+            rbnicsx.backends.\
+            proper_orthogonal_decomposition(snapshots_p_matrix,
+                                            reduced_problem_p._inner_product_action,
+                                            N=Nmax, tol=1.e-6)
+        
+    else:
+        eigenvalues_u, modes_u = None, None
+        eigenvalues_p, modes_p = None, None
+
+    eigenvalues_u, modes_u = MPI.COMM_WORLD.bcast(eigenvalues_u, root=0), bcast_functions_list(modes_u, problem_parametric._V, 0)
+    eigenvalues_p, modes_p = MPI.COMM_WORLD.bcast(eigenvalues_p, root=0), bcast_functions_list(modes_p, problem_parametric._Q, 0)
+
+    reduced_problem_u.set_reduced_basis(modes_u)
+    reduced_problem_p.set_reduced_basis(modes_p)
+
+    # Generate training data
+    training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p = prepare_test_and_training_sets()
+
+    device = "cpu"
+
+    # u only to begin with
+    batch_size = 64 # TODO increase
+    train_dataloader = DataLoader(training_dataset_u, batch_size=batch_size)
+    test_dataloader = DataLoader(validation_dataset_u, batch_size=batch_size)
+
+    input_size = len(Parameters())
+    output_size = reduced_problem_u.rb_dimension()
+    print(f"NN {input_size=}, {output_size=}")
+
+    model = HiddenLayersNet(input_size, [512, 512], output_size, Tanh()).to(device)
+    # TODO remove 
+    model.double() # Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
+    print(model)
+
+    # TODO investigate the loss function
+    loss_fn = nn.MSELoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+
+    ## NN training
+    # TODO plot the evolution with number of epochs
+    epochs = 10
+    for t in range(epochs):
+        print(f"Epoch {t+1}\n-------------------------------")
+        # TODO make a pull request removing reduced_problem argument from these functions
+        train_nn(None, train_dataloader, model, loss_fn, optimizer)
+        validate_nn(None, test_dataloader, model, loss_fn)
+    print("Done!")
 
 
-# Infer solution and save it
-p = Parameters(1.21, 1.37, np.pi/4*1.01)
-X = torch.tensor(p.to_numpy())
-rb_pred = model(X)
-# TODO: ask why it didn't work without specyfing the communicator? How did it know
-rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
+    # Infer solution and save it
+    p = Parameters(1.21, 1.37, np.pi/4*1.01)
+    X = torch.tensor(p.to_numpy())
+    rb_pred = model(X)
+    # TODO: ask why it didn't work without specyfing the communicator? How did it know
+    rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
 
-# TODO make a pull request adding the option to supply solution to error analysis function
-with  HarmonicMeshMotion(mesh, 
-                            facet_tags, 
-                            [wall_marker, lid_marker], 
-                            [p.transform, p.transform], 
-                            reset_reference=True, 
-                            is_deformation=False) as mesh_class:
-    print(f"Projecting the prediction to full basis")
+    # TODO make a pull request adding the option to supply solution to error analysis function
+    with  HarmonicMeshMotion(mesh, 
+                                facet_tags, 
+                                [wall_marker, lid_marker], 
+                                [p.transform, p.transform], 
+                                reset_reference=True, 
+                                is_deformation=False) as mesh_class:
+        print(f"Projecting the prediction to full basis")
 
-    full_order_pred = reduced_problem_u.reconstruct_solution(rb_pred_vec)
+        full_order_pred = reduced_problem_u.reconstruct_solution(rb_pred_vec)
 
-    interpolated_pred = problem_parametric.interpolated_velocity(full_order_pred)
+        interpolated_pred = problem_parametric.interpolated_velocity(full_order_pred)
 
-    print(f"Saving the result")
-    results_folder = Path("results")
-    results_folder.mkdir(exist_ok=True, parents=True)
-    filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
-    with dolfinx.io.XDMFFile(mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
-        xdmf.write_mesh(mesh)
-        xdmf.write_function(interpolated_pred)
+        print(f"Saving the result")
+        results_folder = Path("results")
+        results_folder.mkdir(exist_ok=True, parents=True)
+        filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
+        with dolfinx.io.XDMFFile(mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
+            xdmf.write_mesh(mesh)
+            xdmf.write_function(interpolated_pred)
 
-print("Done")
+    print("Done")
