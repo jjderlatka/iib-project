@@ -23,7 +23,7 @@ class ProblemOnDeformedDomain():
         self._mesh = mesh
         self.gdim = self._mesh.geometry.dim
         self._subdomains = subdomains # NOTE cell_markers
-        self._boundaries = boundaries # NOTE facet_markers
+        self._facet_tags = boundaries # NOTE facet_markers
         self.meshDeformationContext = meshDeformationContext
 
         # Function spaces
@@ -45,11 +45,11 @@ class ProblemOnDeformedDomain():
         # No-slip walls
         u_nonslip = dolfinx.fem.Function(self._V)
         u_nonslip.interpolate(lambda x: (np.zeros_like(x[0]), np.zeros_like(x[1])))
-        bcu_walls = dolfinx.fem.dirichletbc(u_nonslip, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(wall_marker)), self._W.sub(0))
+        bcu_walls = dolfinx.fem.dirichletbc(u_nonslip, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._facet_tags.find(wall_marker)), self._W.sub(0))
         # Driving lid
         u_lid = dolfinx.fem.Function(self._V)
         u_lid.interpolate(lambda x: (np.ones(x[0].shape), np.zeros(x[1].shape)))
-        bcu_lid = dolfinx.fem.dirichletbc(u_lid, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._boundaries.find(lid_marker)), self._W.sub(0))
+        bcu_lid = dolfinx.fem.dirichletbc(u_lid, dolfinx.fem.locate_dofs_topological((self._W.sub(0), self._V), fdim, self._facet_tags.find(lid_marker)), self._W.sub(0))
 
         # Pressure
         def bottom_left(x):
@@ -101,49 +101,43 @@ class ProblemOnDeformedDomain():
     
 
     def interpolated_velocity(self, solution_u):
-        assert(self.parameters is not None)
-        with  self.meshDeformationContext(self._mesh, 
-                    self._boundaries, 
-                    [wall_marker, lid_marker], 
-                    [self.parameters.transform, self.parameters.transform], 
-                    reset_reference=True, 
-                    is_deformation=True):
-            V_interp = dolfinx.fem.VectorFunctionSpace(self._mesh, ("Lagrange", 1))
-            interpolated_u = dolfinx.fem.Function(V_interp)
-            u_expr = dolfinx.fem.Expression(solution_u, V_interp.element.interpolation_points())
-            interpolated_u.interpolate(u_expr)
 
-            return interpolated_u
+        # TODO I tested this interpolation gives the same result with and without mesh deformation, but check with Nirav
+        V_interp = dolfinx.fem.VectorFunctionSpace(self._mesh, ("Lagrange", 1))
+        interpolated_u = dolfinx.fem.Function(V_interp)
+        u_expr = dolfinx.fem.Expression(solution_u, V_interp.element.interpolation_points())
+        interpolated_u.interpolate(u_expr)
+        
+        return interpolated_u
     
 
-    def save_results(self, solution_vel, solution_p):
-        assert(self.parameters is not None)
+    def save_results(self, parameters, solution_vel=None, solution_p=None, name_suffix=""):        
         results_folder = Path("results")
         results_folder.mkdir(exist_ok=True, parents=True)
 
-        filename_pressure = results_folder / "lid_driven_cavity_flow_pressure"
-        filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
+        filename_pressure = results_folder / ( "lid_driven_cavity_flow_pressure" + name_suffix )
+        filename_velocity = results_folder / ( "lid_driven_cavity_flow_velocity" + name_suffix )
 
         with  self.meshDeformationContext(self._mesh, 
-                    self._boundaries, 
-                    [wall_marker, lid_marker], 
-                    [self.parameters.transform, self.parameters.transform], 
-                    reset_reference=True, 
-                    is_deformation=True):
-            with dolfinx.io.XDMFFile(self._mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
-                xdmf.write_mesh(self._mesh)
-                xdmf.write_function(solution_vel)
-
-            with dolfinx.io.XDMFFile(self._mesh.comm, filename_pressure.with_suffix(".xdmf"), "w") as xdmf:
-                xdmf.write_mesh(self._mesh)
-                xdmf.write_function(solution_p)
+                                        self._facet_tags, 
+                                        [wall_marker, lid_marker], 
+                                        [parameters.transform, parameters.transform], 
+                                        reset_reference=True, 
+                                        is_deformation=False):
+        
+            if solution_vel is not None:
+                with dolfinx.io.XDMFFile(self._mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
+                    xdmf.write_mesh(self._mesh)
+                    xdmf.write_function(solution_vel)
+            if solution_p is not None:
+                with dolfinx.io.XDMFFile(self._mesh.comm, filename_pressure.with_suffix(".xdmf"), "w") as xdmf:
+                    xdmf.write_mesh(self._mesh)
+                    xdmf.write_function(solution_p)
     
 
     def solve(self, parameters=Parameters()):
-        self.parameters = parameters
-
         with  self.meshDeformationContext(self._mesh, 
-                    self._boundaries, 
+                    self._facet_tags, 
                     [wall_marker, lid_marker], 
                     [parameters.transform, parameters.transform], 
                     reset_reference=True, 
@@ -354,7 +348,9 @@ if __name__ == "__main__":
     parameters = Parameters(theta=np.pi/6, a=2)
 
     solution_u, solution_p = problem_parametric.solve(parameters)
-    problem_parametric.save_results(problem_parametric.interpolated_velocity(solution_u), solution_p)
+    problem_parametric.save_results(parameters,
+                                    problem_parametric.interpolated_velocity(solution_u),
+                                    solution_p)
 
     for str, reduced_problem, solution in (("Velocity", reduced_problem_u, solution_u),
                                         ("Pressure", reduced_problem_p, solution_p)):

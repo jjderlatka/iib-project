@@ -202,19 +202,14 @@ if __name__ == "__main__":
     # TODO probably remove
     np.random.seed(0)
 
-    comm = MPI.COMM_WORLD
-    gdim = 2 # dimension of the model
-
-    mesh, cell_tags, facet_tags = \
-        dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=gdim)
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=2)
     
     timer.timestamp("Mesh loaded")
 
     mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
     mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
 
-    problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags,
-                                                HarmonicMeshMotion)
+    problem_parametric = ProblemOnDeformedDomain(mesh, cell_tags, facet_tags, HarmonicMeshMotion)
 
     # POD
 
@@ -329,32 +324,26 @@ if __name__ == "__main__":
         timer.timestamp("NN trained")
 
         # Infer solution and save it
-        p = Parameters(1.21, 1.37, np.pi/4*1.01)
+        p = Parameters(1, 2)
         X = torch.tensor(p.to_numpy())
         rb_pred = model(X)
         # TODO: ask why it didn't work without specyfing the communicator? How did it know
         rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
 
+        # Full solution
+        print("Solve")
+        fem_u, fem_p = problem_parametric.solve(p)
+        print("Save results with class method")
+        problem_parametric.save_results(p, problem_parametric.interpolated_velocity(fem_u), fem_p)
+
+        print(f"Projecting the prediction to full basis")
         # TODO make a pull request adding the option to supply solution to error analysis function
-        with  HarmonicMeshMotion(mesh, 
-                                    facet_tags, 
-                                    [wall_marker, lid_marker], 
-                                    [p.transform, p.transform], 
-                                    reset_reference=True, 
-                                    is_deformation=False) as mesh_class:
-            print(f"Projecting the prediction to full basis")
+        full_order_pred = reduced_problem_u.reconstruct_solution(rb_pred_vec)
+        interpolated_pred = problem_parametric.interpolated_velocity(full_order_pred)
+        problem_parametric.save_results(p, interpolated_pred, name_suffix="_int_out")
 
-            full_order_pred = reduced_problem_u.reconstruct_solution(rb_pred_vec)
-
-            interpolated_pred = problem_parametric.interpolated_velocity(full_order_pred)
-
-            print(f"Saving the result")
-            results_folder = Path("results")
-            results_folder.mkdir(exist_ok=True, parents=True)
-            filename_velocity = results_folder / "lid_driven_cavity_flow_velocity"
-            with dolfinx.io.XDMFFile(mesh.comm, filename_velocity.with_suffix(".xdmf"), "w") as xdmf:
-                xdmf.write_mesh(mesh)
-                xdmf.write_function(interpolated_pred)
+        diff = fem_u - full_order_pred
+        problem_parametric.save_results(p, problem_parametric.interpolated_velocity(diff), name_suffix="_diff")
 
         timer.timestamp("Error analysis completed")
     
