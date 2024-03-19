@@ -102,7 +102,7 @@ class ProblemOnDeformedDomain():
 
     def interpolated_velocity(self, solution_u):
 
-        # TODO I tested this interpolation gives the same result with and without mesh deformation, but check with Nirav
+        # TODO I tested this interpolation gives the same result with and without mesh deformation, but check with Nirav -> notebook answer
         V_interp = dolfinx.fem.VectorFunctionSpace(self._mesh, ("Lagrange", 1))
         interpolated_u = dolfinx.fem.Function(V_interp)
         u_expr = dolfinx.fem.Expression(solution_u, V_interp.element.interpolation_points())
@@ -194,6 +194,16 @@ class PODANNReducedProblem():
         absolute_error.x.array[:] = reference_value.x.array - value.x.array
         # absolute_error = value - reference_value
         return self.compute_norm(absolute_error)/self.compute_norm(reference_value)
+    
+
+    def norm_error_deformed_context(self, parameters, reference_value, value):
+        with self._full_problem.meshDeformationContext(self._full_problem._mesh, 
+                    self._full_problem._facet_tags, 
+                    [wall_marker, lid_marker], 
+                    [parameters.transform, parameters.transform], 
+                    reset_reference=True, 
+                    is_deformation=True):
+            return self.norm_error(reference_value, value)
 
 
     def set_reduced_basis(self, functions):
@@ -225,12 +235,12 @@ class PODANNReducedProblem():
         return projected_snapshot
 
 
-    def project_snapshot_deformed_context(self, solution, N):
+    def project_snapshot_deformed_context(self, parameters, solution, N):
         """Project snapshot on the reduced basis space"""
         with self._full_problem.meshDeformationContext(self._full_problem._mesh, 
-                    self._full_problem._boundaries, 
+                    self._full_problem._facet_tags, 
                     [wall_marker, lid_marker], 
-                    [self._full_problem.parameters.transform, self._full_problem.parameters.transform], 
+                    [parameters.transform, parameters.transform], 
                     reset_reference=True, 
                     is_deformation=True):
             return self.project_snapshot(solution, N)

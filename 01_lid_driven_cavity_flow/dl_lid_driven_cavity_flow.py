@@ -211,26 +211,6 @@ def prepare_test_and_training_sets(parameters_list, solutions_u, solutions_p):
     return training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p
 
 
-def save_all_timestamps(timer, root_rank=0):
-    timestamps = timer.get_timestamps()
-    timestamps = MPI.COMM_WORLD.gather(timestamps, root_rank)
-    
-    if MPI.COMM_WORLD.Get_rank() == root_rank:
-        results_folder = Path("results")
-        file_path = results_folder / 'timing.pkl'
-
-        if file_path.exists():
-            with open(file_path, 'rb') as f:
-                all_results = pickle.load(f)
-        else:
-            all_results = {}
-        
-        all_results[MPI.COMM_WORLD.Get_size()] = timestamps
-        
-        with open(file_path, 'wb') as f:
-            pickle.dump(all_results, f)
-
-
 def train_NN(training_dataset, validation_dataset):
     # u only to begin with
     
@@ -245,6 +225,7 @@ def train_NN(training_dataset, validation_dataset):
     output_size = len(training_dataset[0][1])
     print(f"NN {input_size=}, {output_size=}")
 
+    model = HiddenLayersNet(input_size, [30, 30], output_size, Tanh()).to(device)
     model.double() # TODO remove? Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
     print(model)
 
@@ -263,6 +244,44 @@ def train_NN(training_dataset, validation_dataset):
     print("Model trained!")
 
     return model
+
+
+def error_analysis(global_test_parameters, model, problem_parametric, reduced_problem_u, reduced_problem_p):
+    my_test_parameters = np.array_split(global_test_parameters, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+
+    norm_error_u_sum = 0
+    for p_index, p in enumerate(my_test_parameters):
+        print(rbnicsx.io.TextLine(f"{p_index+1} of {len(my_test_parameters)}", fill="#"))
+        print("High fidelity solve for params =", p)
+
+        fem_u, fem_p = problem_parametric.solve(p)
+        pred_u = model(torch.tensor(p.to_numpy()))
+        proj_u = reduced_problem_u.project_snapshot(fem_u)
+        norm_error_u_sum += reduced_problem_u.norm_error_deformed_context(p, proj_u, pred_u)
+    
+    norm_error_u_sum = MPI.COMM_WORLD.allreduce(norm_error_u_sum, MPI.SUM)
+    
+    return norm_error_u_sum / len(global_test_parameters)
+
+
+def save_all_timestamps(timer, root_rank=0):
+    timestamps = timer.get_timestamps()
+    timestamps = MPI.COMM_WORLD.gather(timestamps, root_rank)
+    
+    if MPI.COMM_WORLD.Get_rank() == root_rank:
+        results_folder = Path("results")
+        file_path = results_folder / 'timing.pkl'
+
+        if file_path.exists():
+            with open(file_path, 'rb') as f:
+                all_results = pickle.load(f)
+        else:
+            all_results = {}
+        
+        all_results[MPI.COMM_WORLD.Get_size()] = timestamps
+        
+        with open(file_path, 'wb') as f:
+            pickle.dump(all_results, f)
 
 
 def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u, reduced_problem_p):
@@ -322,6 +341,7 @@ def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u
     div_diff.interpolate(div_diff_expr)
     problem_parametric.save_results(p, div_diff, name_suffix="_div_diff")
 
+
 if __name__ == "__main__":
     timer = Timer()
     
@@ -368,6 +388,10 @@ if __name__ == "__main__":
         model = train_NN(training_dataset_u, validation_dataset_u)
         timer.timestamp("NN trained")
 
+        # TODO fix 
+        # test_parameters_list = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
+        # norm_error_u = error_analysis(test_parameters_list, model, problem_parametric, reduced_problem_u, reduced_problem_p)
+        # print(f"{norm_error_u=}")
         timer.timestamp("Error analysis completed")
 
         p = Parameters(1, 2)
