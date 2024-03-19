@@ -77,35 +77,13 @@ def subdivide_deformation(target, steps=1):
     return steps_list
 
 
-# NOTE confirmed works
 def test(mesh, facet_tags, target, reference):
     return HarmonicMeshMotion(mesh, facet_tags, markers, transform(target, reference), reset_reference=True, is_deformation=True)
 
 
-def comparison():
-    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
-
-    results_folder = Path("results/02")
-    results_folder.mkdir(exist_ok=True, parents=True)
-    filename = results_folder / "obstacle_mesh_deformed"
-
-    print("Attempting to deform the mesh")
-    p = Parameters(H=1, r=0.1, c_x=0.4, c_y=0.5) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
-
-    [p1, p2, p3] = subdivide_deformation(p, 2)
-
-    with test(mesh, facet_tags, p3, p1):
-        with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-            xdmf.write_mesh(mesh)
-
-    filename = results_folder / "obstacle_mesh_deformed_twice"
-    with test(mesh, facet_tags, p2, p1):
-        with test(mesh, facet_tags, p3, p2):
-            with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-                xdmf.write_mesh(mesh)
-
-
 def generate_mesh(parameters, file_name):
+    gdim = 2
+    
     rectangle = gmsh.model.occ.addRectangle(0, -parameters.H/2, 0, parameters.L, parameters.H, tag=1)
     obstacle = gmsh.model.occ.addDisk(parameters.c_x, -parameters.H/2 + parameters.c_y, 0, parameters.r, parameters.r)
 
@@ -182,6 +160,29 @@ def mesh_xdmf():
         xdmf.write_mesh(mesh)
 
 
+def comparison():
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
+
+    results_folder = Path("results/02")
+    results_folder.mkdir(exist_ok=True, parents=True)
+    filename = results_folder / "obstacle_mesh_deformed"
+
+    print("Attempting to deform the mesh")
+    p = Parameters(H=1, r=0.1, c_x=0.4, c_y=0.5) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
+
+    [p1, p2, p3] = subdivide_deformation(p, 2)
+
+    with test(mesh, facet_tags, p3, p1):
+        with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+            xdmf.write_mesh(mesh)
+
+    filename = results_folder / "obstacle_mesh_deformed_twice"
+    with test(mesh, facet_tags, p2, p1):
+        with test(mesh, facet_tags, p3, p2):
+            with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+                xdmf.write_mesh(mesh)
+
+
 def deformed_mesh_xdmf():
     mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
 
@@ -193,15 +194,11 @@ def deformed_mesh_xdmf():
 
 
 if __name__ == "__main__":
-    gdim = 2
-    mesh_comm = MPI.COMM_WORLD
-    model_rank = 0
-
     parameters = Parameters()
     file_name = "obstacle_mesh.msh"
 
     gmsh.initialize()
-    if mesh_comm.rank == model_rank:
+    if MPI.COMM_WORLD.Get_rank() == 0:
         generate_mesh(parameters, file_name)
         mesh_xdmf()
         # deformed_mesh_xdmf()
