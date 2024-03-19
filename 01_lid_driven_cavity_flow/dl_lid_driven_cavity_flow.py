@@ -181,15 +181,11 @@ def generate_rb_solutions_list(global_parameters_set):
         rb_snapshots_u_matrix[params_index, :] = rb_snapshot_u
         rb_snapshots_p_matrix[params_index, :] = rb_snapshot_p
 
-    rb_snapshots_u_matrix = MPI.COMM_WORLD.gather(rb_snapshots_u_matrix, 0)
-    rb_snapshots_p_matrix = MPI.COMM_WORLD.gather(rb_snapshots_p_matrix, 0)
+    rb_snapshots_u_matrix = MPI.COMM_WORLD.allgather(rb_snapshots_u_matrix)
+    rb_snapshots_p_matrix = MPI.COMM_WORLD.allgather(rb_snapshots_p_matrix)
     
-    if MPI.COMM_WORLD.Get_rank() == 0:
-        rb_snapshots_u_matrix = np.concatenate(rb_snapshots_u_matrix, axis=0)
-        rb_snapshots_p_matrix = np.concatenate(rb_snapshots_p_matrix, axis=0)
-
-    rb_snapshots_u_matrix = MPI.COMM_WORLD.bcast(rb_snapshots_u_matrix, 0)
-    rb_snapshots_p_matrix = MPI.COMM_WORLD.bcast(rb_snapshots_p_matrix, 0)
+    rb_snapshots_u_matrix = np.concatenate(rb_snapshots_u_matrix, axis=0)
+    rb_snapshots_p_matrix = np.concatenate(rb_snapshots_p_matrix, axis=0)
 
     return rb_snapshots_u_matrix, rb_snapshots_p_matrix
 
