@@ -9,6 +9,7 @@ from dlrbnicsx.train_validate_test.train_validate_test import train_nn, validate
 import dolfinx
 import rbnicsx.io
 from petsc4py import PETSc
+import ufl
 
 import torch
 from torch import nn
@@ -272,14 +273,13 @@ def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u
     # Infer solution
     X = torch.tensor(preview_parameter.to_numpy())
     rb_pred = model(X)
-    # TODO: ask why it didn't work without specyfing the communicator? How did it know
     rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
 
     # Full solution
     fem_u, fem_p = problem_parametric.solve(preview_parameter)
-    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_exact")
+    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_fem")
 
-    # POD solution
+    # Reduced basis projection of full solution
     rb_snapshot_u = reduced_problem_u.project_snapshot(fem_u)
     rb_snapshot_p = reduced_problem_p.project_snapshot(fem_p)
     reconstructed_u = reduced_problem_u.reconstruct_solution(rb_snapshot_u)
@@ -288,22 +288,54 @@ def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u
     # problem_parametric.save_results(p, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_rb")
 
     # NN solution
-    # TODO make a pull request adding the option to supply solution to error analysis function
-    full_order_pred = reduced_problem_u.reconstruct_solution(rb_pred_vec)
-    interpolated_pred = problem_parametric.interpolated_velocity(full_order_pred)
+    pred_u = reduced_problem_u.reconstruct_solution(rb_pred_vec) 
+    interpolated_pred = problem_parametric.interpolated_velocity(pred_u)
     problem_parametric.save_results(p, interpolated_pred, name_suffix="_pred")
 
+    # Plot difference
+    u_diff = problem_parametric.interpolated_velocity(pred_u - reconstructed_u)
+    problem_parametric.save_results(p, u_diff, name_suffix="_diff")
+
+    # TODO relative difference
+
+    # Divergence
+    divergence_space = dolfinx.fem.FunctionSpace(problem_parametric._mesh, ufl.FiniteElement("DG", problem_parametric._mesh.ufl_cell(), 1))
+    divergence_plot_space = dolfinx.fem.FunctionSpace(problem_parametric._mesh, ufl.FiniteElement("CG", problem_parametric._mesh.ufl_cell(), 1))
+
+    # Plot divergence of the original one
+    fem_u_div_expr = dolfinx.fem.Expression(ufl.div(fem_u), divergence_space.element.interpolation_points())
+    fem_u_div = dolfinx.fem.Function(divergence_plot_space)
+    fem_u_div.interpolate(fem_u_div_expr)
+    problem_parametric.save_results(p, solution_vel=fem_u_div, name_suffix="_div_fem")
+
+    # Plot divergence of the reduced basis projection
+    rb_u_div_expr = dolfinx.fem.Expression(ufl.div(reconstructed_u), divergence_space.element.interpolation_points())
+    rb_u_div = dolfinx.fem.Function(divergence_plot_space)
+    rb_u_div.interpolate(rb_u_div_expr)
+    problem_parametric.save_results(p, solution_vel=rb_u_div, name_suffix="_div_rb")
+
+    # Plot divergence of the NN solution
+    pred_u_div_expr = dolfinx.fem.Expression(ufl.div(pred_u), divergence_space.element.interpolation_points())
+    pred_u_div = dolfinx.fem.Function(divergence_plot_space)
+    pred_u_div.interpolate(pred_u_div_expr)
+    problem_parametric.save_results(p, solution_vel=pred_u_div, name_suffix="_div_pred")
+
+    # Plot the difference in divergence
+    div_diff_expr = dolfinx.fem.Expression(ufl.div(pred_u) - ufl.div(reconstructed_u), divergence_space.element.interpolation_points())
+    div_diff = dolfinx.fem.Function(divergence_plot_space)
+    div_diff.interpolate(div_diff_expr)
+    problem_parametric.save_results(p, div_diff, name_suffix="_div_diff")
 
 if __name__ == "__main__":
     timer = Timer()
-    # TODO probably remove
-    np.random.seed(0)
+    
+    np.random.seed(0) # TODO temporary
 
     # Load mesh
     mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=2)
     mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
     mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
-    timer.timestamp("Mesh loaded") # TODO is it a problem that I'm timing i/o operations?
+    timer.timestamp("Mesh loaded") # TODO is it a problem that I'm timing i/o operations? -> difference between process time and all time
 
 
     # Set up the problem
@@ -315,7 +347,7 @@ if __name__ == "__main__":
     # POD
     print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
 
-    # TODO ask: why waste time broadcasting this set to every rank, if each can generate it itself in very few operations
+    # TODO ask: why waste time broadcasting this set to every rank, if each can generate it itself in very few operations -> in case the sampling is not deterministic, but random
     global_training_set = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
     snapshots_u_matrix, snapshots_p_matrix = generate_solutions_list(global_training_set)
     mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
