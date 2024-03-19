@@ -17,7 +17,7 @@ inlet_marker, outlet_marker, wall_marker, obstacle_marker = 2, 3, 4, 5
 markers = [inlet_marker, outlet_marker, wall_marker, obstacle_marker]
 
 class Parameters():
-    def __init__(self, L=2.2, H=0.41, c_x = 0.2, c_y = 0.2, r = 0.05, mu=0.001, rho=1):
+    def __init__(self, L=2.2, H=0.41, c_x = 0.2, c_y = 0.2, r = 0.05, nu=0.001, rho=1):
         self.L = L
         self.H = H
         self.c_x = c_x
@@ -25,8 +25,11 @@ class Parameters():
         self.r = r
         # self.mu = Constant(mesh, PETSc.ScalarType(0.001))  # TODO make into a mesh const
         # self.rho = Constant(mesh, PETSc.ScalarType(1))     # TODO
-        self.mu = PETSc.ScalarType(mu)       # NOTE Dynamic viscosity
+        self.nu = PETSc.ScalarType(nu)       # NOTE Dynamic viscosity
         self.rho = PETSc.ScalarType(rho)     # NOTE Density
+
+    def __repr__(self):
+        return f"(L={self.L},H={self.H},c_x={self.c_x},c_y={self.c_y},r={self.r},nu={self.nu:.3f},rho={self.rho:.3f})"
 
 # NOTE all transformations assume a rectangle with lower left corner at (0, -H/2)
 def transform(target, reference=Parameters()):
@@ -58,7 +61,51 @@ def transform(target, reference=Parameters()):
             obstacle_transform]
 
 
-def gerenate_mesh(parameters, file_name):
+def subdivide_deformation(target, steps=1):
+    reference = Parameters()
+
+    L = np.linspace(reference.L, target.L, steps + 1)
+    H = np.linspace(reference.H, target.H, steps + 1)
+    C_X = np.linspace(reference.c_x, target.c_x, steps + 1)
+    C_Y = np.linspace(reference.c_y, target.c_y, steps + 1)
+    R = np.linspace(reference.r, target.r, steps + 1)
+
+    steps_list = []
+    for l, h, c_x, c_y, r in zip(L, H, C_X, C_Y, R):
+        steps_list.append(Parameters(l, h, c_x, c_y, r))
+
+    return steps_list
+
+
+# NOTE confirmed works
+def test(mesh, facet_tags, target, reference):
+    return HarmonicMeshMotion(mesh, facet_tags, markers, transform(target, reference), reset_reference=True, is_deformation=True)
+
+
+def comparison():
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
+
+    results_folder = Path("results/02")
+    results_folder.mkdir(exist_ok=True, parents=True)
+    filename = results_folder / "obstacle_mesh_deformed"
+
+    print("Attempting to deform the mesh")
+    p = Parameters(H=1, r=0.1, c_x=0.4, c_y=0.5) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
+
+    [p1, p2, p3] = subdivide_deformation(p, 2)
+
+    with test(mesh, facet_tags, p3, p1):
+        with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+            xdmf.write_mesh(mesh)
+
+    filename = results_folder / "obstacle_mesh_deformed_twice"
+    with test(mesh, facet_tags, p2, p1):
+        with test(mesh, facet_tags, p3, p2):
+            with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+                xdmf.write_mesh(mesh)
+
+
+def generate_mesh(parameters, file_name):
     rectangle = gmsh.model.occ.addRectangle(0, -parameters.H/2, 0, parameters.L, parameters.H, tag=1)
     obstacle = gmsh.model.occ.addDisk(parameters.c_x, -parameters.H/2 + parameters.c_y, 0, parameters.r, parameters.r)
 
@@ -126,11 +173,7 @@ def gerenate_mesh(parameters, file_name):
 
 
 def mesh_xdmf():
-    comm = MPI.COMM_WORLD
-    gdim = 2 # dimension of the model
-    gmsh_model_rank = 0
-
-    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", comm, gmsh_model_rank, gdim=gdim)
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
 
     results_folder = Path("results")
     results_folder.mkdir(exist_ok=True, parents=True)
@@ -140,21 +183,13 @@ def mesh_xdmf():
 
 
 def deformed_mesh_xdmf():
-    comm = MPI.COMM_WORLD
-    gdim = 2 # dimension of the model
-    gmsh_model_rank = 0
-
-    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", comm, gmsh_model_rank, gdim=gdim)
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
 
     results_folder = Path("results")
     results_folder.mkdir(exist_ok=True, parents=True)
     filename = results_folder / "obstacle_mesh_deformed"
 
     print("Attempting to deform the mesh")
-    p = Parameters(H=1, r=0.1, c_x=0.4, c_y=0.5) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
-    with HarmonicMeshMotion(mesh, facet_tags, markers, transform(p), reset_reference=True, is_deformation=True):
-        with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
-            xdmf.write_mesh(mesh)
 
 
 if __name__ == "__main__":
@@ -167,6 +202,7 @@ if __name__ == "__main__":
 
     gmsh.initialize()
     if mesh_comm.rank == model_rank:
-        gerenate_mesh(parameters, file_name)
+        generate_mesh(parameters, file_name)
         mesh_xdmf()
-        deformed_mesh_xdmf()
+        # deformed_mesh_xdmf()
+        comparison()
