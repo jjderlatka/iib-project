@@ -33,6 +33,9 @@ class Parameters():
 
 # NOTE all transformations assume a rectangle with lower left corner at (0, -H/2)
 def transform(target, reference=Parameters()):
+    """Return a list of transformations from reference to target 
+    parameters for [inlet_marker, outlet_marker, wall_marker, 
+    obstacle_marker] in that order. """
     def inlet_transform(x):
         dx = x[0] * 0.
         dy = (x[1]/reference.H) * (target.H - reference.H)
@@ -61,9 +64,9 @@ def transform(target, reference=Parameters()):
             obstacle_transform]
 
 
-def subdivide_deformation(target, steps=1):
-    reference = Parameters()
-
+def subdivide_transformation(target, steps=1, reference = Parameters()):
+    """Linearly break down the transition from reference to target parameters
+    into given number of steps."""
     L = np.linspace(reference.L, target.L, steps + 1)
     H = np.linspace(reference.H, target.H, steps + 1)
     C_X = np.linspace(reference.c_x, target.c_x, steps + 1)
@@ -77,8 +80,50 @@ def subdivide_deformation(target, steps=1):
     return steps_list
 
 
-def test(mesh, facet_tags, target, reference):
-    return HarmonicMeshMotion(mesh, facet_tags, markers, transform(target, reference), reset_reference=True, is_deformation=True)
+def transform_steps(target, steps=1, reference=Parameters()):
+    """Return a function returning list of transformation functions
+    for the ith step in a multistep reference to target deformation."""
+    steps_list = subdivide_transformation(target, steps, reference)
+    def transform_(i):
+        assert(0 <= i and i < steps)
+        return transform(steps_list[i+1], steps_list[i])
+    return transform_
+
+
+class CompoundedMeshDeformation:
+    def __init__(self, meshDeformationContext, mesh, boundaries, bc_markers_list, bc_function_list,
+                 reset_reference=False, is_deformation=True, steps=1):
+        self.meshDeformationContext = meshDeformationContext
+        self.mesh = mesh
+        self.boundaries = boundaries
+        self.bc_markers_list = bc_markers_list
+        self.bc_function_list = bc_function_list
+        self.reset_reference = reset_reference
+        self.is_deformation = is_deformation
+        
+        self.steps = steps
+        self.instances = []
+
+
+    def __enter__(self):
+        # Create and enter a new instance for each level of nesting
+        for i in range(self.steps):
+            instance = self.meshDeformationContext(self.mesh,
+                                                   self.boundaries,
+                                                   self.bc_markers_list,
+                                                   self.bc_function_list(i),
+                                                   self.reset_reference,
+                                                   self.is_deformation)
+            instance.__enter__()
+            self.instances.append(instance)
+        # Return the last instance entered
+        return self.instances[-1]
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Exit instances in reverse order to match the nesting
+        while self.instances:
+            instance = self.instances.pop()
+            instance.__exit__(exc_type, exc_val, exc_tb)
 
 
 def generate_mesh(parameters, file_name):
@@ -153,7 +198,7 @@ def generate_mesh(parameters, file_name):
 def mesh_xdmf():
     mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
 
-    results_folder = Path("results")
+    results_folder = Path("results/02")
     results_folder.mkdir(exist_ok=True, parents=True)
     filename = results_folder / "obstacle_mesh"
     with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
@@ -170,15 +215,15 @@ def comparison():
     print("Attempting to deform the mesh")
     p = Parameters(H=1, r=0.1, c_x=0.4, c_y=0.5) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
 
-    [p1, p2, p3] = subdivide_deformation(p, 2)
+    [p1, p2, p3] = subdivide_transformation(p, 2)
 
-    with test(mesh, facet_tags, p3, p1):
+    with HarmonicMeshMotion(mesh, facet_tags, markers, transform(p3, p1), reset_reference=True, is_deformation=True):
         with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
             xdmf.write_mesh(mesh)
 
     filename = results_folder / "obstacle_mesh_deformed_twice"
-    with test(mesh, facet_tags, p2, p1):
-        with test(mesh, facet_tags, p3, p2):
+    with HarmonicMeshMotion(mesh, facet_tags, markers, transform(p2, p1), reset_reference=True, is_deformation=True):
+        with HarmonicMeshMotion(mesh, facet_tags, markers, transform(p3, p2), reset_reference=True, is_deformation=True):
             with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
                 xdmf.write_mesh(mesh)
 
@@ -186,11 +231,24 @@ def comparison():
 def deformed_mesh_xdmf():
     mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", MPI.COMM_WORLD, 0, gdim=2)
 
-    results_folder = Path("results")
+    results_folder = Path("results/02")
     results_folder.mkdir(exist_ok=True, parents=True)
     filename = results_folder / "obstacle_mesh_deformed"
 
     print("Attempting to deform the mesh")
+    p = Parameters(H=1, r=0.1, c_x=0.4, c_y=0.5) # NOTE TODO when L is brought down sufficiently far (1.5), the mesh degenerates around the obstacle
+    steps = 8
+    with CompoundedMeshDeformation(HarmonicMeshMotion,
+                                   mesh,
+                                   facet_tags,
+                                   markers,
+                                   transform_steps(p, steps),
+                                   reset_reference=True,
+                                   is_deformation=True,
+                                   steps=steps):
+        with dolfinx.io.XDMFFile(mesh.comm, filename.with_suffix(".xdmf"), "w") as xdmf:
+            xdmf.write_mesh(mesh)
+
 
 
 if __name__ == "__main__":
@@ -201,5 +259,4 @@ if __name__ == "__main__":
     if MPI.COMM_WORLD.Get_rank() == 0:
         generate_mesh(parameters, file_name)
         mesh_xdmf()
-        # deformed_mesh_xdmf()
-        comparison()
+        deformed_mesh_xdmf()
