@@ -59,7 +59,7 @@ def mpi_print(s):
     print(f"[Rank {MPI.COMM_WORLD.Get_rank()}]: {s}")
 
 
-# TODO implementing __setstate__ and __getstate__ would data to be pickled and therefore bcasted and gathered easily
+# TODO implementing __setstate__ and __getstate__ would let data to be pickled and therefore bcasted and gathered easily
 def gather_functions_list(functions_list, root_rank=0):
     function_space = functions_list.function_space
 
@@ -196,6 +196,41 @@ def save_all_timestamps(timer, root_rank=0):
             pickle.dump(all_results, f)
 
 
+def train_NN(training_dataset, validation_dataset):
+    # u only to begin with
+    
+    device = "cpu"
+
+    batch_size = 64
+    train_dataloader = DataLoader(training_dataset, batch_size=batch_size)
+    test_dataloader = DataLoader(validation_dataset, batch_size=batch_size)
+
+    assert(training_dataset[0])
+    input_size = len(training_dataset[0][0])
+    output_size = len(training_dataset[0][1])
+    print(f"NN {input_size=}, {output_size=}")
+
+    model = HiddenLayersNet(input_size, [512, 512], output_size, Tanh()).to(device)
+    # TODO remove 
+    model.double() # Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
+    print(model)
+
+    # TODO investigate the loss function
+    loss_fn = nn.MSELoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+
+    # TODO plot the evolution with number of epochs
+    epochs = 10
+    for t in range(epochs):
+        print(f"Epoch {t+1}\n-------------------------------")
+        # TODO make a pull request removing reduced_problem argument from these functions
+        train_nn(None, train_dataloader, model, loss_fn, optimizer)
+        validate_nn(None, test_dataloader, model, loss_fn)
+    print("Model trained!")
+
+    return model
+
+
 if __name__ == "__main__":
     timer = Timer()
     
@@ -231,7 +266,6 @@ if __name__ == "__main__":
     # TODO ask: why do dolfinx and rbnicsx have the two level interface? Each function calls its backend version
     my_training_set = np.array_split(global_training_set, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
     # mpi_print(my_training_set)
-    # TODO priority first: make a function for solving a for many parameters, with the distributed option, in the original class
     
     for (params_index, params) in enumerate(my_training_set):
         print(rbnicsx.io.TextLine(f"{params_index+1} of {my_training_set.shape[0]}", fill="#"))
@@ -291,35 +325,7 @@ if __name__ == "__main__":
 
     if MPI.COMM_WORLD.Get_rank() == 0:
 
-        device = "cpu"
-
-        # u only to begin with
-        batch_size = 64 # TODO increase
-        train_dataloader = DataLoader(training_dataset_u, batch_size=batch_size)
-        test_dataloader = DataLoader(validation_dataset_u, batch_size=batch_size)
-
-        input_size = len(Parameters())
-        output_size = reduced_problem_u.rb_dimension()
-        print(f"NN {input_size=}, {output_size=}")
-
-        model = HiddenLayersNet(input_size, [512, 512], output_size, Tanh()).to(device)
-        # TODO remove 
-        model.double() # Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
-        print(model)
-
-        # TODO investigate the loss function
-        loss_fn = nn.MSELoss()
-        optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
-
-        ## NN training
-        # TODO plot the evolution with number of epochs
-        epochs = 10
-        for t in range(epochs):
-            print(f"Epoch {t+1}\n-------------------------------")
-            # TODO make a pull request removing reduced_problem argument from these functions
-            train_nn(None, train_dataloader, model, loss_fn, optimizer)
-            validate_nn(None, test_dataloader, model, loss_fn)
-        print("Done!")
+        model = train_NN(training_dataset_u, validation_dataset_u)
 
         timer.timestamp("NN trained")
 
