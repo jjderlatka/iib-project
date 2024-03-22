@@ -29,7 +29,7 @@ def extend_to_lists(label_dictionary):
 
 
 def plot_timings():
-    results_folder = Path("results")
+    results_folder = Path("results/01")
     filename = 'timing.pkl'
 
     with open(results_folder/filename, 'rb') as f:

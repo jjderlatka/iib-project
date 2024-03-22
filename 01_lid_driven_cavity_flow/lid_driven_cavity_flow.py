@@ -112,7 +112,7 @@ class ProblemOnDeformedDomain():
     
 
     def save_results(self, parameters, solution_vel=None, solution_p=None, name_suffix=""):        
-        results_folder = Path("results")
+        results_folder = Path("results/01")
         results_folder.mkdir(exist_ok=True, parents=True)
 
         filename_pressure = results_folder / ( "lid_driven_cavity_flow_pressure" + name_suffix )

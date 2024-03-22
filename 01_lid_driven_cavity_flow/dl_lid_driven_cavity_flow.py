@@ -269,7 +269,7 @@ def save_all_timestamps(timer, root_rank=0):
     timestamps = MPI.COMM_WORLD.gather(timestamps, root_rank)
     
     if MPI.COMM_WORLD.Get_rank() == root_rank:
-        results_folder = Path("results")
+        results_folder = Path("results/01")
         file_path = results_folder / 'timing.pkl'
 
         if file_path.exists():
