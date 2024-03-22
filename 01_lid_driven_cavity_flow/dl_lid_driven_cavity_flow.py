@@ -53,7 +53,8 @@ class CustomDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        return self.parameters[idx], self.solutions[idx]
+        return torch.from_numpy(self.parameters[idx]).to(torch.float32),\
+            torch.from_numpy(self.solutions[idx]).to(torch.float32),
     
 
 def mpi_print(s):
@@ -190,25 +191,23 @@ def generate_rb_solutions_list(global_parameters_set):
     return rb_snapshots_u_matrix, rb_snapshots_p_matrix
 
 
-def prepare_test_and_training_sets(parameters_list, solutions_u, solutions_p):
-    num_training_samples = int(0.7 * len(parameters_list))
-    num_validation_samples = len(parameters_list) - num_training_samples
-
+def prepare_test_and_training_sets(parameters_list, solutions, num_training_samples, reduced_problem):
     paramteres_values_list = np.array([p.to_numpy() for p in parameters_list])
 
+    reduced_problem.set_scaling_range(paramteres_values_list, solutions)
+
+    # TODO disable transforms in CustomDataset sourcecode and compare results
+    # Training set
     input_training_set = paramteres_values_list[:num_training_samples, :]
-    solutions_u_training_set = solutions_u[:num_training_samples, :]
-    solutions_p_training_set = solutions_p[:num_training_samples, :]
-    training_dataset_u = CustomDataset(input_training_set, solutions_u_training_set)
-    training_dataset_p = CustomDataset(input_training_set, solutions_p_training_set)
+    solutions_training_set = solutions[:num_training_samples, :]
+    training_dataset = CustomDataset(input_training_set, solutions_training_set)
 
+    # Validation set
     input_validation_set = paramteres_values_list[num_training_samples:, :]
-    solutions_u_validation_set = solutions_u[num_training_samples:, :]
-    solutions_p_validation_set = solutions_p[num_training_samples:, :]
-    validation_dataset_u = CustomDataset(input_validation_set, solutions_u_validation_set)
-    validation_dataset_p = CustomDataset(input_validation_set, solutions_p_validation_set)
+    solutions_validation_set = solutions[num_training_samples:, :]
+    validation_dataset = CustomDataset(input_validation_set, solutions_validation_set)
 
-    return training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p
+    return training_dataset, validation_dataset
 
 
 def train_NN(training_dataset, validation_dataset):
@@ -226,7 +225,7 @@ def train_NN(training_dataset, validation_dataset):
     print(f"NN {input_size=}, {output_size=}")
 
     model = HiddenLayersNet(input_size, [30, 30], output_size, Tanh()).to(device)
-    model.double() # TODO remove? Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles))
+    # model.double() # TODO remove? Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles)) -> DLRBniCSx conerts everything to floats internally
     print(model)
 
     # TODO investigate the loss function
@@ -286,7 +285,7 @@ def save_all_timestamps(timer, root_rank=0):
 
 def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u, reduced_problem_p):
     # Infer solution
-    X = torch.tensor(preview_parameter.to_numpy())
+    X = torch.tensor(preview_parameter.to_numpy()).to(torch.float32)
     rb_pred = model(X)
     rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
 
@@ -359,7 +358,6 @@ if __name__ == "__main__":
     
     reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
     reduced_problem_p = PODANNReducedProblem(problem_parametric, problem_parametric._Q)
-
     # POD
     print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
 
@@ -379,17 +377,23 @@ if __name__ == "__main__":
     paramteres_list = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
     np.random.shuffle(paramteres_list)
     solutions_list_u, solutions_list_p = generate_rb_solutions_list(paramteres_list)
-    training_dataset_u, training_dataset_p, validation_dataset_u, validation_dataset_p =\
-        prepare_test_and_training_sets(paramteres_list, solutions_list_u, solutions_list_p)
-    timer.timestamp("NN dataset calculated")
 
     if MPI.COMM_WORLD.Get_rank() == 0:
+        num_training_samples = int(0.7 * len(paramteres_list))
+        training_dataset_u, validation_dataset_u =\
+            prepare_test_and_training_sets(paramteres_list, solutions_list_u, num_training_samples, reduced_problem_u)
+        training_dataset_p, validation_dataset_p =\
+            prepare_test_and_training_sets(paramteres_list, solutions_list_p, num_training_samples, reduced_problem_p)
+
+        print(f"{training_dataset_u[0]=}")
+        
+        timer.timestamp("NN dataset calculated")
 
         model = train_NN(training_dataset_u, validation_dataset_u)
         timer.timestamp("NN trained")
 
         # TODO fix 
-        # test_parameters_list = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
+        # test_parameters_list = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
         # norm_error_u = error_analysis(test_parameters_list, model, problem_parametric, reduced_problem_u, reduced_problem_p)
         # print(f"{norm_error_u=}")
         timer.timestamp("Error analysis completed")

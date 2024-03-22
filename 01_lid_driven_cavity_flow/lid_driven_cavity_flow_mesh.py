@@ -19,7 +19,8 @@ class Parameters():
     
 
     def to_numpy(self):
-        return np.array([self.a, self.b, self.theta, float(self.nu), float(self.rho)])
+        # return np.array([self.a, self.b, self.theta, float(self.nu), float(self.rho)])
+        return np.array([self.a, self.b, self.theta])
     
 
     def __len__(self):

@@ -176,6 +176,11 @@ class PODANNReducedProblem():
         self._function_space = function_space
         self._basis_functions = rbnicsx.backends.FunctionsList(function_space)
 
+        self.input_scaling_range = [-1., 1.]
+        self.input_range = None
+        self.output_scaling_range = [-1., 1.]
+        self.output_range = None
+
 
     # TODO look at the difference between using different norms
     def _inner_product_action(self, fun_j):
@@ -249,6 +254,11 @@ class PODANNReducedProblem():
     def reconstruct_solution(self, reduced_solution):
         """Reconstruct a RB projection of a snapshot back to high fidelity space"""
         return self._basis_functions[:reduced_solution.size] * reduced_solution
+    
+
+    def set_scaling_range(self, parameters, solutions):
+        self.input_range = np.stack((np.min(parameters, axis=0), np.max(parameters, axis=0)), axis=0)
+        self.output_range = np.stack((np.min(solutions, axis=0), np.max(solutions, axis=0)), axis=0)
 
 
 if __name__ == "__main__":
