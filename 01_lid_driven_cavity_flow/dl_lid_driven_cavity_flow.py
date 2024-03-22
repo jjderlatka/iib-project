@@ -2,9 +2,10 @@ from lid_driven_cavity_flow_mesh import Parameters, fluid_marker, lid_marker, wa
 from lid_driven_cavity_flow import ProblemOnDeformedDomain, PODANNReducedProblem
 
 from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
+from dlrbnicsx.dataset.custom_dataset import CustomDataset
 from dlrbnicsx.neural_network.neural_network import HiddenLayersNet
 from dlrbnicsx.activation_function.activation_function_factory import Tanh
-from dlrbnicsx.train_validate_test.train_validate_test import train_nn, validate_nn
+from dlrbnicsx.train_validate_test.train_validate_test import train_nn, validate_nn, online_nn
 
 import dolfinx
 import rbnicsx.io
@@ -39,22 +40,6 @@ class Timer:
 
     def get_timestamps(self):
         return self.__timestamps
-
-
-class CustomDataset(Dataset):
-    def __init__(self, parameters_list, solutions_list):
-        assert(len(parameters_list) == len(solutions_list))
-        self.parameters = parameters_list
-        self.solutions = solutions_list
-
-
-    def __len__(self):
-        return len(self.parameters)
-
-
-    def __getitem__(self, idx):
-        return torch.from_numpy(self.parameters[idx]).to(torch.float32),\
-            torch.from_numpy(self.solutions[idx]).to(torch.float32),
     
 
 def mpi_print(s):
@@ -200,12 +185,18 @@ def prepare_test_and_training_sets(parameters_list, solutions, num_training_samp
     # Training set
     input_training_set = paramteres_values_list[:num_training_samples, :]
     solutions_training_set = solutions[:num_training_samples, :]
-    training_dataset = CustomDataset(input_training_set, solutions_training_set)
+    training_dataset = CustomDataset(reduced_problem,
+                                     input_training_set,
+                                     solutions_training_set,
+                                     verbose=True)
 
     # Validation set
     input_validation_set = paramteres_values_list[num_training_samples:, :]
     solutions_validation_set = solutions[num_training_samples:, :]
-    validation_dataset = CustomDataset(input_validation_set, solutions_validation_set)
+    validation_dataset = CustomDataset(reduced_problem,
+                                       input_validation_set,
+                                       solutions_validation_set,
+                                       verbose=True)
 
     return training_dataset, validation_dataset
 
@@ -285,9 +276,11 @@ def save_all_timestamps(timer, root_rank=0):
 
 def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u, reduced_problem_p):
     # Infer solution
-    X = torch.tensor(preview_parameter.to_numpy()).to(torch.float32)
-    rb_pred = model(X)
-    rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
+    # X = torch.tensor(preview_parameter.to_numpy()).to(torch.float32)
+    # rb_pred = model(X)
+    # rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
+    rb_pred_vec = online_nn(reduced_problem_u, None, preview_parameter.to_numpy(), model, reduced_problem_u.rb_dimension())
+
 
     # Full solution
     fem_u, fem_p = problem_parametric.solve(preview_parameter)
@@ -384,8 +377,6 @@ if __name__ == "__main__":
             prepare_test_and_training_sets(paramteres_list, solutions_list_u, num_training_samples, reduced_problem_u)
         training_dataset_p, validation_dataset_p =\
             prepare_test_and_training_sets(paramteres_list, solutions_list_p, num_training_samples, reduced_problem_p)
-
-        print(f"{training_dataset_u[0]=}")
         
         timer.timestamp("NN dataset calculated")
 
