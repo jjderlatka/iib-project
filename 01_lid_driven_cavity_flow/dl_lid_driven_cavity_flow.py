@@ -2,10 +2,11 @@ from lid_driven_cavity_flow_mesh import Parameters, fluid_marker, lid_marker, wa
 from lid_driven_cavity_flow import ProblemOnDeformedDomain, PODANNReducedProblem
 
 from mdfenicsx.mesh_motion_classes import HarmonicMeshMotion
-from dlrbnicsx.dataset.custom_dataset import CustomDataset
+from dlrbnicsx.dataset.custom_partitioned_dataset import CustomPartitionedDataset
 from dlrbnicsx.neural_network.neural_network import HiddenLayersNet
 from dlrbnicsx.activation_function.activation_function_factory import Tanh
-from dlrbnicsx.train_validate_test.train_validate_test import train_nn, validate_nn, online_nn
+from dlrbnicsx.train_validate_test.train_validate_test_distributed import train_nn, validate_nn, online_nn
+from dlrbnicsx.interface.wrappers import model_synchronise, init_cpu_process_group
 
 import dolfinx
 import rbnicsx.io
@@ -167,6 +168,7 @@ def generate_rb_solutions_list(global_parameters_set):
         rb_snapshots_u_matrix[params_index, :] = rb_snapshot_u
         rb_snapshots_p_matrix[params_index, :] = rb_snapshot_p
 
+    # TODO possible to not gather all solutions, as each NN training processes only uses its subset of training data
     rb_snapshots_u_matrix = MPI.COMM_WORLD.allgather(rb_snapshots_u_matrix)
     rb_snapshots_p_matrix = MPI.COMM_WORLD.allgather(rb_snapshots_p_matrix)
     
@@ -185,18 +187,24 @@ def prepare_test_and_training_sets(parameters_list, solutions, num_training_samp
     # Training set
     input_training_set = paramteres_values_list[:num_training_samples, :]
     solutions_training_set = solutions[:num_training_samples, :]
-    training_dataset = CustomDataset(reduced_problem,
+    my_training_indices = np.array_split(range(len(input_training_set)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+    
+    # TODO seems wasteful for each instance of CustomPartitionedDataset to be keeping entire dataset and only using a subset of it
+    training_dataset = CustomPartitionedDataset(reduced_problem,
                                      input_training_set,
                                      solutions_training_set,
-                                     verbose=True)
+                                     my_training_indices,
+                                     verbose=False)
 
     # Validation set
     input_validation_set = paramteres_values_list[num_training_samples:, :]
     solutions_validation_set = solutions[num_training_samples:, :]
-    validation_dataset = CustomDataset(reduced_problem,
+    my_validation_indices = np.array_split(range(len(input_validation_set)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+    validation_dataset = CustomPartitionedDataset(reduced_problem,
                                        input_validation_set,
                                        solutions_validation_set,
-                                       verbose=True)
+                                       my_validation_indices,
+                                       verbose=False)
 
     return training_dataset, validation_dataset
 
@@ -217,7 +225,7 @@ def train_NN(training_dataset, validation_dataset):
 
     model = HiddenLayersNet(input_size, [30, 30], output_size, Tanh()).to(device)
     # model.double() # TODO remove? Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles)) -> DLRBniCSx conerts everything to floats internally
-    print(model)
+    model_synchronise(model, verbose=False)
 
     # TODO investigate the loss function
     loss_fn = nn.MSELoss()
@@ -371,24 +379,25 @@ if __name__ == "__main__":
     np.random.shuffle(paramteres_list)
     solutions_list_u, solutions_list_p = generate_rb_solutions_list(paramteres_list)
 
+    init_cpu_process_group(MPI.COMM_WORLD)
+
+    num_training_samples = int(0.7 * len(paramteres_list))
+    training_dataset_u, validation_dataset_u =\
+        prepare_test_and_training_sets(paramteres_list, solutions_list_u, num_training_samples, reduced_problem_u)
+    training_dataset_p, validation_dataset_p =\
+        prepare_test_and_training_sets(paramteres_list, solutions_list_p, num_training_samples, reduced_problem_p)
+    timer.timestamp("NN dataset calculated")
+
+    model = train_NN(training_dataset_u, validation_dataset_u)
+    timer.timestamp("NN trained")
+
+    # TODO fix 
+    # test_parameters_list = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
+    # norm_error_u = error_analysis(test_parameters_list, model, problem_parametric, reduced_problem_u, reduced_problem_p)
+    # print(f"{norm_error_u=}")
+    timer.timestamp("Error analysis completed")
+
     if MPI.COMM_WORLD.Get_rank() == 0:
-        num_training_samples = int(0.7 * len(paramteres_list))
-        training_dataset_u, validation_dataset_u =\
-            prepare_test_and_training_sets(paramteres_list, solutions_list_u, num_training_samples, reduced_problem_u)
-        training_dataset_p, validation_dataset_p =\
-            prepare_test_and_training_sets(paramteres_list, solutions_list_p, num_training_samples, reduced_problem_p)
-        
-        timer.timestamp("NN dataset calculated")
-
-        model = train_NN(training_dataset_u, validation_dataset_u)
-        timer.timestamp("NN trained")
-
-        # TODO fix 
-        # test_parameters_list = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
-        # norm_error_u = error_analysis(test_parameters_list, model, problem_parametric, reduced_problem_u, reduced_problem_p)
-        # print(f"{norm_error_u=}")
-        timer.timestamp("Error analysis completed")
-
         p = Parameters(1, 2)
         save_preview(p, model, problem_parametric, reduced_problem_u, reduced_problem_p)
     
