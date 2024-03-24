@@ -229,11 +229,12 @@ def train_NN(training_dataset, validation_dataset):
 
     # TODO investigate the loss function
     loss_fn = nn.MSELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2) # torch.optim.SGD(model.parameters(), lr=1)
+    
 
     # TODO plot the evolution with number of epochs
-    # (plot the loss function evolution, but also prediction made with NN trained up to given epoch)
-    epochs = 100
+    # (plot the loss function evolution, but also prediction made with NN trained up to given epoch) 
+    epochs = 1000
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
         # TODO make a pull request removing reduced_problem argument from these functions
