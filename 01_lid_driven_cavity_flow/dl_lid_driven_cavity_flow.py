@@ -247,19 +247,25 @@ def train_NN(training_dataset, validation_dataset):
 def error_analysis(global_test_parameters, model, problem_parametric, reduced_problem_u, reduced_problem_p):
     my_test_parameters = np.array_split(global_test_parameters, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
 
-    norm_error_u_sum = 0
+    norm_error_u_sum, norm_error_deformed_u_sum = 0, 0
     for p_index, p in enumerate(my_test_parameters):
         print(rbnicsx.io.TextLine(f"{p_index+1} of {len(my_test_parameters)}", fill="#"))
         print("High fidelity solve for params =", p)
 
         fem_u, fem_p = problem_parametric.solve(p)
-        pred_u = model(torch.tensor(p.to_numpy()))
-        proj_u = reduced_problem_u.project_snapshot(fem_u)
-        norm_error_u_sum += reduced_problem_u.norm_error_deformed_context(p, proj_u, pred_u)
+        rb_fem_u, rb_fem_p = reduced_problem_u.project_snapshot(fem_u), reduced_problem_p.project_snapshot(fem_p)
+
+        rb_pred_u = online_nn(reduced_problem_u, None, p.to_numpy(), model, reduced_problem_u.rb_dimension())
+        # rb_pred_u = model(torch.tensor(p.to_numpy()))
+        pred_u = reduced_problem_u.reconstruct_solution(rb_pred_u)
+
+        norm_error_deformed_u_sum += reduced_problem_u.norm_error_deformed_context(p, fem_u, pred_u)
+        norm_error_u_sum += reduced_problem_u.norm_error_deformed_context(p, fem_u, pred_u)
     
+    norm_error_deformed_u_sum = MPI.COMM_WORLD.allreduce(norm_error_u_sum, MPI.SUM)
     norm_error_u_sum = MPI.COMM_WORLD.allreduce(norm_error_u_sum, MPI.SUM)
     
-    return norm_error_u_sum / len(global_test_parameters)
+    return norm_error_deformed_u_sum / len(global_test_parameters), norm_error_u_sum / len(global_test_parameters)
 
 
 def save_all_timestamps(timer, root_rank=0):
@@ -391,10 +397,9 @@ if __name__ == "__main__":
     model = train_NN(training_dataset_u, validation_dataset_u)
     timer.timestamp("NN trained")
 
-    # TODO fix 
-    # test_parameters_list = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
-    # norm_error_u = error_analysis(test_parameters_list, model, problem_parametric, reduced_problem_u, reduced_problem_p)
-    # print(f"{norm_error_u=}")
+    test_parameters_list = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
+    norm_error_deformed_u, norm_error_u = error_analysis(test_parameters_list, model, problem_parametric, reduced_problem_u, reduced_problem_p)
+    print(f"{norm_error_u=}, {norm_error_deformed_u=}")
     timer.timestamp("Error analysis completed")
 
     if MPI.COMM_WORLD.Get_rank() == 0:

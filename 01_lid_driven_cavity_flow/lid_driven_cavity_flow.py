@@ -240,17 +240,6 @@ class PODANNReducedProblem():
         return projected_snapshot
 
 
-    def project_snapshot_deformed_context(self, parameters, solution, N):
-        """Project snapshot on the reduced basis space"""
-        with self._full_problem.meshDeformationContext(self._full_problem._mesh, 
-                    self._full_problem._facet_tags, 
-                    [wall_marker, lid_marker], 
-                    [parameters.transform, parameters.transform], 
-                    reset_reference=True, 
-                    is_deformation=True):
-            return self.project_snapshot(solution, N)
-
-
     def reconstruct_solution(self, reduced_solution):
         """Reconstruct a RB projection of a snapshot back to high fidelity space"""
         return self._basis_functions[:reduced_solution.size] * reduced_solution
