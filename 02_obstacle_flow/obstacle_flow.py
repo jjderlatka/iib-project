@@ -12,6 +12,9 @@ import numpy as np
 
 from pathlib import Path
 
+def mpi_print(s):
+    print(f"[Rank {MPI.COMM_WORLD.Get_rank()}]: {s}")
+
 class Problem():
     def __init__(self, mesh, subdomains, boundaries):
         self._mesh = mesh
@@ -33,7 +36,8 @@ class Problem():
 
     def get_boundary_conditions(self, t):
         fdim = self._mesh.topology.dim - 1
-       
+        gdim = self.gdim
+
         class InletVelocity():
             def __init__(self, t):
                 self.t = t
@@ -64,6 +68,7 @@ class Problem():
 
     
     def solve(self, parameters):
+        mpi_print(f"FEM solve {parameters}")
         t = 0
         T = 8                         # Final time
         dt = 1 / 1600                 # Time step size
@@ -98,7 +103,7 @@ class Problem():
         f = dolfinx.fem.Constant(mesh, PETSc.ScalarType((0, 0)))
         F1 = parameters.rho / k * ufl.dot(u - u_n, v) * ufl.dx
         F1 += ufl.inner(ufl.dot(1.5 * u_n - 0.5 * u_n1, 0.5 * ufl.nabla_grad(u + u_n)), v) * ufl.dx
-        F1 += 0.5 * parameters.mu * ufl.inner(ufl.grad(u + u_n), ufl.grad(v)) * ufl.dx - ufl.dot(p_, ufl.div(v)) * ufl.dx
+        F1 += 0.5 * parameters.nu * ufl.inner(ufl.grad(u + u_n), ufl.grad(v)) * ufl.dx - ufl.dot(p_, ufl.div(v)) * ufl.dx
         F1 += ufl.dot(f, v) * ufl.dx
         a1 = dolfinx.fem.form(ufl.lhs(F1))
         L1 = dolfinx.fem.form(ufl.rhs(F1))
@@ -141,10 +146,10 @@ class Problem():
         pc3 = solver3.getPC()
         pc3.setType(PETSc.PC.Type.SOR)
 
-        folder = Path("results")
+        folder = Path("results/02") / str(parameters)
         folder.mkdir(exist_ok=True, parents=True)
-        vtx_u = dolfinx.io.VTXWriter(mesh.comm, "dfg2D-3-u.bp", [u_], engine="BP4")
-        vtx_p = dolfinx.io.VTXWriter(mesh.comm, "dfg2D-3-p.bp", [p_], engine="BP4")
+        vtx_u = dolfinx.io.VTXWriter(mesh.comm, folder/"dfg2D-3-u.bp", [u_], engine="BP4")
+        vtx_p = dolfinx.io.VTXWriter(mesh.comm, folder/"dfg2D-3-p.bp", [p_], engine="BP4")
         vtx_u.write(t)
         vtx_p.write(t)
 
@@ -202,16 +207,15 @@ class Problem():
         vtx_p.close()
 
 if __name__ == "__main__":
-    comm = MPI.COMM_WORLD
-    gdim = 2 # dimension of the model
-    gmsh_model_rank = 0
+    mesh_comm = MPI.COMM_WORLD
 
-    mesh, cell_tags, facet_tags = \
-        dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", comm,
-                                        gmsh_model_rank, gdim=gdim)
+    mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("obstacle_mesh.msh", mesh_comm, 0, gdim=2)
+    mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
+    mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
     
     problem = Problem(mesh, cell_tags, facet_tags)
-    problem.solve(Parameters())
+    # problem.solve(Parameters())
+    problem.solve(Parameters(H=1, c_x=0.3))
 
 
 # TODO questions:
