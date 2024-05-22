@@ -160,8 +160,8 @@ def temp_generate_solutions_list(global_training_set):
     my_training_set = np.array_split(global_training_set, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
     
     for (params_index, params) in enumerate(my_training_set):
-        # print(rbnicsx.io.TextLine(f"{params_index+1} of {my_training_set.shape[0]}", fill="#")) # TODO solver
-        # print("High fidelity solve for params =", params) # TODO solver
+        print(rbnicsx.io.TextLine(f"{params_index+1} of {my_training_set.shape[0]}", fill="#"))
+        print("High fidelity solve for params =", params)
         snapshot_u, snapshot_p = problem_parametric.solve(params)
 
         solutions_u.append(snapshot_u)
@@ -531,8 +531,8 @@ if __name__ == "__main__":
 
     # Load mesh
     mesh, cell_tags, facet_tags = dolfinx.io.gmshio.read_from_msh("mesh.msh", MPI.COMM_SELF, 0, gdim=2)
-    # mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}") # RTO
-    # mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
+    mpi_print(f"Number of local cells: {mesh.topology.index_map(2).size_local}")
+    mpi_print(f"Number of global cells: {mesh.topology.index_map(2).size_global}")
     timer.timestamp("Mesh loaded") # TODO is it a problem that I'm timing i/o operations? -> difference between process time and all time
 
 
@@ -542,29 +542,21 @@ if __name__ == "__main__":
     reduced_problem_u = PODANNReducedProblem(problem_parametric, problem_parametric._V)
     reduced_problem_p = PODANNReducedProblem(problem_parametric, problem_parametric._Q)
     # POD
-    # print(rbnicsx.io.TextBox("POD offline phase begins", fill="=")) # TODO solver
+    print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
 
     range_0 = (0.5, 2.5)
     range_1 = (0.5, 2.5)
     range_2 = (np.pi/10, 9*np.pi/10)
     ranges = [range_0, range_1, range_2]
-    number_of_samples = 100 # TODO solver
+    number_of_samples = 200
     Nmax = 100 # Max number of POD basis functions
     reuse_samples = True
     
 
-    # global_training_set = generate_parameters_list(ranges, number_of_samples) # TODO solver
-    with open('results/samples.npy', 'rb') as f: # TODO solver
-        np.load(f) # TODO solver
-        global_training_set_np = np.load(f) # TODO solver
-    global_training_set = [Parameters(*params_array) for  params_array in global_training_set_np]
+    global_training_set = generate_parameters_list(ranges, number_of_samples)
 
-    solver_start = process_time_ns() # TODO solver
     # snapshots_u_matrix, snapshots_p_matrix = generate_solutions_list(global_training_set)
     snapshots_u_list, snapshots_p_list = temp_generate_solutions_list(global_training_set)
-    solver_finish = process_time_ns() # TODO solver
-    print(f"solver time = {solver_finish - solver_start} ns") # TODO solver
-    exit() # TODO solver
     snapshots_u_matrix, snapshots_p_matrix = temp_generate_functions_list(snapshots_u_list, problem_parametric._V), temp_generate_functions_list(snapshots_p_list, problem_parametric._Q)
     mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
     timer.timestamp("POD training set calculated")
