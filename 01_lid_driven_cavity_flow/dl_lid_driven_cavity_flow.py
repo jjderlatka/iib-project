@@ -271,7 +271,7 @@ def prepare_test_and_training_sets(parameters_list, solutions, num_training_samp
     return training_dataset, validation_dataset
 
 
-def train_NN(training_dataset, validation_dataset):
+def train_NN(training_dataset, validation_dataset, error_analyser, test_parameters_list, solutions, reduced_problem, name):
     # u only to begin with
     
     device = "cpu"
@@ -297,13 +297,28 @@ def train_NN(training_dataset, validation_dataset):
     # TODO plot the evolution with number of epochs
     # (plot the loss function evolution, but also prediction made with NN trained up to given epoch) 
     epochs = 1000
+
+    norm_error_deformed_evolution = []
+    norm_error_evolution = []
+
     for t in range(epochs):
         report = (t % 100 == 1)
         if report:
             print(f"Epoch {t+1}\n-------------------------------")
+        
         # TODO make a pull request removing reduced_problem argument from these functions
         train_nn(None, train_dataloader, model, loss_fn, optimizer, report)
         validate_nn(None, test_dataloader, model, loss_fn, report)
+
+        if report:
+            norm_error_deformed, norm_error = error_analyser(test_parameters_list, model, solutions, reduced_problem)
+            norm_error_deformed_evolution.append(norm_error_deformed)
+            norm_error_evolution.append(norm_error)
+
+    with open(f'results/error_evolution_{name}.npy', 'wb') as f:
+        np.save(f, norm_error_deformed_evolution)
+        np.save(f, norm_error_evolution)
+    
     print("Model trained!")
 
     return model
@@ -336,6 +351,46 @@ def error_analysis_distr(global_test_parameters, model_u, model_p, global_u_solu
     norm_error_p_sum = MPI.COMM_WORLD.allreduce(norm_error_p_sum, MPI.SUM)
     
     return norm_error_deformed_u_sum / len(global_test_parameters), norm_error_u_sum / len(global_test_parameters), norm_error_deformed_p_sum / len(global_test_parameters), norm_error_p_sum / len(global_test_parameters)
+
+
+def error_analysis_distr_u(global_test_parameters, model_u, global_u_solutions, reduced_problem_u):
+    my_indices = np.array_split(range(len(global_test_parameters)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+
+    norm_error_u_sum, norm_error_deformed_u_sum = 0, 0
+
+    for p_index in my_indices:
+        p = global_test_parameters[p_index]
+        rb_pred_u = online_nn(reduced_problem_u, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension())
+
+        pred_u = reduced_problem_u.reconstruct_solution(rb_pred_u)
+
+        norm_error_deformed_u_sum += reduced_problem_u.norm_error_deformed_context(p, global_u_solutions[p_index], pred_u)
+        norm_error_u_sum += reduced_problem_u.norm_error(global_u_solutions[p_index], pred_u)
+
+    norm_error_deformed_u_sum = MPI.COMM_WORLD.allreduce(norm_error_u_sum, MPI.SUM)
+    norm_error_u_sum = MPI.COMM_WORLD.allreduce(norm_error_u_sum, MPI.SUM)
+    
+    return norm_error_deformed_u_sum / len(global_test_parameters), norm_error_u_sum / len(global_test_parameters)
+
+
+def error_analysis_distr_p(global_test_parameters, model_p, global_p_solutions, reduced_problem_p):
+    my_indices = np.array_split(range(len(global_test_parameters)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+
+    norm_error_p_sum, norm_error_deformed_p_sum = 0, 0
+
+    for p_index in my_indices:
+        p = global_test_parameters[p_index]
+        rb_pred_p = online_nn(reduced_problem_p, None, p.to_numpy(), model_p, reduced_problem_p.rb_dimension())
+
+        pred_p = reduced_problem_p.reconstruct_solution(rb_pred_p)
+
+        norm_error_deformed_p_sum += reduced_problem_p.norm_error_deformed_context(p, global_p_solutions[p_index], pred_p)
+        norm_error_p_sum += reduced_problem_p.norm_error(global_p_solutions[p_index], pred_p)
+
+    norm_error_deformed_p_sum = MPI.COMM_WORLD.allreduce(norm_error_p_sum, MPI.SUM)
+    norm_error_p_sum = MPI.COMM_WORLD.allreduce(norm_error_p_sum, MPI.SUM)
+    
+    return norm_error_deformed_p_sum / len(global_test_parameters), norm_error_p_sum / len(global_test_parameters)
 
 
 def save_all_timestamps(timer, root_rank=0):
@@ -481,13 +536,15 @@ if __name__ == "__main__":
         prepare_test_and_training_sets(paramteres_list, solutions_list_p, num_training_samples, reduced_problem_p)
     timer.timestamp("NN dataset calculated")
 
-    model_u = train_NN(training_dataset_u, validation_dataset_u)
-    model_p = train_NN(training_dataset_p, validation_dataset_p)
-    timer.timestamp("NN trained")
-
     test_parameters_list = generate_parameters_list(ranges, 27)
     solutions_u, solutions_p = temp_generate_solutions_list(test_parameters_list) 
-    norm_error_deformed_u, norm_error_u, norm_error_deformed_p, norm_error_p = error_analysis_distr(test_parameters_list, model_u, model_p, solutions_u, solutions_p, reduced_problem_u, reduced_problem_p)
+
+    model_u = train_NN(training_dataset_u, validation_dataset_u, error_analysis_distr_u, test_parameters_list, solutions_u, reduced_problem_u, "velocity")
+    model_p = train_NN(training_dataset_p, validation_dataset_p, error_analysis_distr_p, test_parameters_list, solutions_p, reduced_problem_p, "pressure")
+    timer.timestamp("NN trained")
+
+    norm_error_deformed_u, norm_error_u = error_analysis_distr_u(test_parameters_list, model_u, solutions_u, reduced_problem_u)
+    norm_error_deformed_p, norm_error_p = error_analysis_distr_p(test_parameters_list, model_p, solutions_p, reduced_problem_p)
     print(f"{norm_error_u=}, {norm_error_deformed_u=}, {norm_error_p=}, {norm_error_deformed_p=}")
 
     timer.timestamp("Error analysis completed")

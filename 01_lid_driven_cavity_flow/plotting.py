@@ -178,5 +178,21 @@ def plot_eigenvalue_decays():
     plt.tight_layout()
     save('eigenvalue_decay.png')
 
+def plot_error_evolution():
+    error_evolution = {}
+    with open('results/error_evolution_velocity.npy', 'rb') as f:
+        error_evolution["norm_error_deformed_u"] = np.load(f)
+        error_evolution["norm_error_u"] = np.load(f)
+
+    with open('results/error_evolution_pressure.npy', 'rb') as f:
+        error_evolution["norm_error_deformed_p"] = np.load(f)
+        error_evolution["norm_error_p"] = np.load(f)
+
+    fig, axs = plt.subplots(1, 4, figsize=(16, 10))
+    for i, (name, values) in enumerate(error_evolution.items()):
+        axs[i].plot(values)
+
+    save('error_evolution.png')
+
 if __name__ == "__main__":
-    plot_eigenvalue_decays()
+    plot_error_evolution()
