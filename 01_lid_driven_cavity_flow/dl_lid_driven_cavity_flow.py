@@ -167,7 +167,7 @@ def temp_generate_solutions_list(global_training_set):
         solutions_u.append(snapshot_u)
         solutions_p.append(snapshot_p)
 
-    mpi_print(f"Rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
+    mpi_print(f"Rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(solutions_p)} snapshots.")
 
     coefficients_u = []
     coefficients_p = []
@@ -191,6 +191,39 @@ def temp_generate_solutions_list(global_training_set):
         solutions_p.append(sol_p)
 
     return solutions_u, solutions_p
+
+
+def temp_generate_functions_list(solutions, function_space):
+    solutions_matrix = rbnicsx.backends.FunctionsList(function_space)
+    for solution in solutions:
+        solutions_matrix.append(solution)
+
+    return solutions_matrix
+
+
+def temp_generate_rb_solutions_list(solutions, reduced_problem):
+    # TODO for larger problems it may make sense to parallelize this projection. Here communication cost almost certainly higher than the cost of all projections combined
+    rb_snapshots_matrix = np.empty((len(solutions), reduced_problem.rb_dimension()))
+
+    for i, solution in enumerate(solutions):
+        rb_snapshots_matrix[i, :] = reduced_problem.project_snapshot(solution)
+
+    return rb_snapshots_matrix
+
+
+def shuffle(paramteres_list, rb_solutions_list_u, rb_solutions_list_p):
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        permutation = list(range(len(paramteres_list)))
+        np.random.shuffle(permutation)
+    else:
+        permutation = None
+    permutation = MPI.COMM_WORLD.bcast(permutation, root=0)
+    
+    paramteres_list = [paramteres_list[i] for i in permutation]
+    rb_solutions_list_u = [rb_solutions_list_u[i] for i in permutation]
+    rb_solutions_list_p = [rb_solutions_list_p[i] for i in permutation]
+
+    return paramteres_list, rb_solutions_list_u, rb_solutions_list_p
 
 
 def proper_orthogonal_decomposition(reduced_problem, snapshots_matrix, Nmax):
@@ -296,19 +329,32 @@ def train_NN(training_dataset, validation_dataset, error_analyser, test_paramete
 
     # TODO plot the evolution with number of epochs
     # (plot the loss function evolution, but also prediction made with NN trained up to given epoch) 
-    epochs = 1000
+    epochs = 4000
 
     norm_error_deformed_evolution = []
     norm_error_evolution = []
 
+    lowest_validation_score= np.inf
+    current_increase_length = 0
+    max_increase_length = 20
+
     for t in range(epochs):
-        report = (t % 100 == 1)
+        report = (t % 50 == 1)
         if report:
             print(f"Epoch {t+1}\n-------------------------------")
         
         # TODO make a pull request removing reduced_problem argument from these functions
         train_nn(None, train_dataloader, model, loss_fn, optimizer, report)
-        validate_nn(None, test_dataloader, model, loss_fn, report)
+        validation_score = validate_nn(None, test_dataloader, model, loss_fn, report)
+
+        if validation_score < lowest_validation_score:
+            lowest_validation_score = validation_score
+            current_increase_length = 0
+        else:
+            current_increase_length += 1
+            if current_increase_length >= max_increase_length:
+                print(f"Early stopping termination in epoch {t+1}")
+                break
 
         if report:
             norm_error_deformed, norm_error = error_analyser(test_parameters_list, model, solutions, reduced_problem)
@@ -475,7 +521,7 @@ def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduce
 
     n = 0
     # Plot the nth most significant RB mode projected into the full basis
-    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[n]), reduced_problem_p._basis_functions[n], name_suffix="_rb_1st_mode_other")
+    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[n]), reduced_problem_p._basis_functions[n], name_suffix="_rb_1st_mode")
 
 
 if __name__ == "__main__":
@@ -504,11 +550,9 @@ if __name__ == "__main__":
     ranges = [range_0, range_1, range_2]
     number_of_samples = 300
     Nmax = 100 # Max number of POD basis functions
-    reuse_samples = False
-    
-    global_training_set = generate_parameters_list(ranges, number_of_samples)
-
-    snapshots_u_matrix, snapshots_p_matrix = generate_solutions_list(global_training_set)
+    # global_training_set = generate_parameters_list(ranges, number_of_samples) # TODO solver
+    snapshots_u_list, snapshots_p_list = temp_generate_solutions_list(global_training_set)
+    snapshots_u_matrix, snapshots_p_matrix = temp_generate_functions_list(snapshots_u_list, problem_parametric._V), temp_generate_functions_list(snapshots_p_list, problem_parametric._Q)
     mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
     timer.timestamp("POD training set calculated")
 
@@ -521,23 +565,35 @@ if __name__ == "__main__":
             np.save(f, [len(m_u), len(m_p)])
     timer.timestamp("Reduced basis calculated")
 
+    # TODO bug
+    # lorem, ipsum = temp_generate_solutions_list(global_training_set) # doesnt work, crashes on the error estimation set generatino
+    # temp_generate_solutions_list(global_training_set) # works
+    
     # NN
     # Generate training data
-    paramteres_list = generate_parameters_list(ranges, number_of_samples)
-    np.random.shuffle(paramteres_list)
-    solutions_list_u, solutions_list_p = generate_rb_solutions_list(paramteres_list)
+    if reuse_samples == False: # works for N=150, 200 samples but not for N=250, 300 samples
+        paramteres_list = generate_parameters_list(ranges, number_of_samples)
+        snapshots_u_list, snapshots_p_list = temp_generate_solutions_list(paramteres_list)
+    else: # works
+        paramteres_list = global_training_set # legacy naming, should be the same variable
+
+
+    rb_solutions_list_u = temp_generate_rb_solutions_list(snapshots_u_list, reduced_problem_u)
+    rb_solutions_list_p = temp_generate_rb_solutions_list(snapshots_p_list, reduced_problem_p)
+
+    paramteres_list, rb_solutions_list_u, rb_solutions_list_p = shuffle(paramteres_list, rb_solutions_list_u, rb_solutions_list_p) 
 
     init_cpu_process_group(MPI.COMM_WORLD)
 
     num_training_samples = int(0.7 * len(paramteres_list))
     training_dataset_u, validation_dataset_u =\
-        prepare_test_and_training_sets(paramteres_list, solutions_list_u, num_training_samples, reduced_problem_u)
+        prepare_test_and_training_sets(paramteres_list, rb_solutions_list_u, num_training_samples, reduced_problem_u)
     training_dataset_p, validation_dataset_p =\
-        prepare_test_and_training_sets(paramteres_list, solutions_list_p, num_training_samples, reduced_problem_p)
+        prepare_test_and_training_sets(paramteres_list, rb_solutions_list_p, num_training_samples, reduced_problem_p)
     timer.timestamp("NN dataset calculated")
 
     test_parameters_list = generate_parameters_list(ranges, 27)
-    solutions_u, solutions_p = temp_generate_solutions_list(test_parameters_list) 
+    solutions_u, solutions_p = temp_generate_solutions_list(test_parameters_list)
 
     model_u = train_NN(training_dataset_u, validation_dataset_u, error_analysis_distr_u, test_parameters_list, solutions_u, reduced_problem_u, "velocity")
     model_p = train_NN(training_dataset_p, validation_dataset_p, error_analysis_distr_p, test_parameters_list, solutions_p, reduced_problem_p, "pressure")
@@ -545,7 +601,7 @@ if __name__ == "__main__":
 
     norm_error_deformed_u, norm_error_u = error_analysis_distr_u(test_parameters_list, model_u, solutions_u, reduced_problem_u)
     norm_error_deformed_p, norm_error_p = error_analysis_distr_p(test_parameters_list, model_p, solutions_p, reduced_problem_p)
-    print(f"{norm_error_u=}, {norm_error_deformed_u=}, {norm_error_p=}, {norm_error_deformed_p=}")
+    print(f"N = {number_of_samples}, error_u= {norm_error_deformed_u}, error_p= {norm_error_deformed_p}")
 
     timer.timestamp("Error analysis completed")
 
