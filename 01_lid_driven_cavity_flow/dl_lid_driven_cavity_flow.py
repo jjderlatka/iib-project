@@ -13,6 +13,8 @@ import rbnicsx.io
 from petsc4py import PETSc
 import ufl
 
+from scipy.stats import qmc
+
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
@@ -102,8 +104,27 @@ def generate_parameters_values_list(samples):
     return training_set
 
 
-def generate_parameters_list(parameteres_values):
-    return np.array([Parameters(*vals) for vals in parameteres_values])
+def generate_parameters_values_list_random(ranges, n):
+    l_bounds = [r[0] for r in ranges]
+    u_bounds = [r[1] for r in ranges]
+    
+    sampler = qmc.LatinHypercube(d=3)
+    sample = sampler.random(n)
+    scaled_samples = qmc.scale(sample, l_bounds, u_bounds)
+    
+    return scaled_samples
+
+
+def generate_parameters_list(ranges, number_of_samples):
+    samples = None
+    if MPI.COMM_WORLD.Get_rank() == 0:
+        samples = generate_parameters_values_list_random(ranges, number_of_samples)
+        with open('results/samples.npy', 'wb') as f:
+            np.save(f, np.array(ranges))
+            np.save(f, np.array(samples))
+    samples = MPI.COMM_WORLD.bcast(samples, root=0)
+
+    return np.array([Parameters(*sample) for sample in samples])
 
 
 def generate_solutions_list(global_training_set):
@@ -130,11 +151,51 @@ def generate_solutions_list(global_training_set):
     return snapshots_u_matrix, snapshots_p_matrix
 
 
-def proper_orthogonal_decomposition(reduced_problem, snapshots_matrix):
+def temp_generate_solutions_list(global_training_set):
+    # TODO discuss: what are the benefits or choosing every 10th vs continous sections of 10. Any caching benefit? Any way to use the similarity between solving similar solutions? Maybe iterative methods could use the solution to neighbouring parameter as the starting point?
+    # TODO not necessarily helpful atm, as LU is used (am I right?) But maybe could switch to a different solver, slower for one solve, but faster for a range of them
+    solutions_u = []
+    solutions_p = []
+    
+    my_training_set = np.array_split(global_training_set, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+    
+    for (params_index, params) in enumerate(my_training_set):
+        print(rbnicsx.io.TextLine(f"{params_index+1} of {my_training_set.shape[0]}", fill="#"))
+        print("High fidelity solve for params =", params)
+        snapshot_u, snapshot_p = problem_parametric.solve(params)
+
+        solutions_u.append(snapshot_u)
+        solutions_p.append(snapshot_p)
+
+    mpi_print(f"Rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
+
+    coefficients_u = []
+    coefficients_p = []
+    for sol_u, sol_p in zip(solutions_u, solutions_p):
+        # TODO: could be removing copied functions from the original functions_list, but FunctionsList class doesn't have any method for removing other than erasing all
+        coefficients_u.append(sol_u.vector[:])
+        coefficients_p.append(sol_p.vector[:])
+    
+    coefficients_u = MPI.COMM_WORLD.allgather(coefficients_u)
+    coefficients_p = MPI.COMM_WORLD.allgather(coefficients_p)
+
+    coefficients_u = np.concatenate(coefficients_u, axis=0)
+    coefficients_p = np.concatenate(coefficients_p, axis=0)
+    
+    solutions_u, solutions_p = [], []
+    for (coefs_u, coefs_p) in zip(coefficients_u, coefficients_p):
+        sol_u, sol_p = dolfinx.fem.Function(problem_parametric._V), dolfinx.fem.Function(problem_parametric._Q)
+        sol_u.vector.setArray(coefs_u)
+        sol_p.vector.setArray(coefs_p)
+        solutions_u.append(sol_u)
+        solutions_p.append(sol_p)
+
+    return solutions_u, solutions_p
+
+
+def proper_orthogonal_decomposition(reduced_problem, snapshots_matrix, Nmax):
     # NOTE POD parallelization: correlation matrix assembly could be paralalleized
     # NOTE SLEPc eigensolve underlying POD could also be parallalized
-    
-    Nmax = 100 # the number of basis functions
 
     if MPI.COMM_WORLD.Get_rank() == 0:
         eigenvalues, modes, _ = \
@@ -142,13 +203,14 @@ def proper_orthogonal_decomposition(reduced_problem, snapshots_matrix):
             proper_orthogonal_decomposition(snapshots_matrix,
                                             reduced_problem._inner_product_action,
                                             N=Nmax, tol=1.e-6)
-        
     else:
         eigenvalues, modes = None, None
 
     eigenvalues, modes = MPI.COMM_WORLD.bcast(eigenvalues, root=0), bcast_functions_list(modes, reduced_problem._function_space, 0)
 
     reduced_problem.set_reduced_basis(modes)
+
+    return eigenvalues, modes
 
 
 def generate_rb_solutions_list(global_parameters_set):
@@ -236,37 +298,44 @@ def train_NN(training_dataset, validation_dataset):
     # (plot the loss function evolution, but also prediction made with NN trained up to given epoch) 
     epochs = 1000
     for t in range(epochs):
-        print(f"Epoch {t+1}\n-------------------------------")
+        report = (t % 100 == 1)
+        if report:
+            print(f"Epoch {t+1}\n-------------------------------")
         # TODO make a pull request removing reduced_problem argument from these functions
-        train_nn(None, train_dataloader, model, loss_fn, optimizer)
-        validate_nn(None, test_dataloader, model, loss_fn)
+        train_nn(None, train_dataloader, model, loss_fn, optimizer, report)
+        validate_nn(None, test_dataloader, model, loss_fn, report)
     print("Model trained!")
 
     return model
 
 
-def error_analysis(global_test_parameters, model, problem_parametric, reduced_problem_u, reduced_problem_p):
-    my_test_parameters = np.array_split(global_test_parameters, MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+def error_analysis_distr(global_test_parameters, model_u, model_p, global_u_solutions, global_p_solutions, reduced_problem_u, reduced_problem_p):
+    my_indices = np.array_split(range(len(global_test_parameters)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
 
     norm_error_u_sum, norm_error_deformed_u_sum = 0, 0
-    for p_index, p in enumerate(my_test_parameters):
-        print(rbnicsx.io.TextLine(f"{p_index+1} of {len(my_test_parameters)}", fill="#"))
-        print("High fidelity solve for params =", p)
+    norm_error_p_sum, norm_error_deformed_p_sum = 0, 0
 
-        fem_u, fem_p = problem_parametric.solve(p)
-        rb_fem_u, rb_fem_p = reduced_problem_u.project_snapshot(fem_u), reduced_problem_p.project_snapshot(fem_p)
+    for p_index in my_indices:
+        p = global_test_parameters[p_index]
+        rb_pred_u = online_nn(reduced_problem_u, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension())
+        rb_pred_p = online_nn(reduced_problem_p, None, p.to_numpy(), model_p, reduced_problem_p.rb_dimension())
 
-        rb_pred_u = online_nn(reduced_problem_u, None, p.to_numpy(), model, reduced_problem_u.rb_dimension())
-        # rb_pred_u = model(torch.tensor(p.to_numpy()))
         pred_u = reduced_problem_u.reconstruct_solution(rb_pred_u)
+        pred_p = reduced_problem_p.reconstruct_solution(rb_pred_p)
 
-        norm_error_deformed_u_sum += reduced_problem_u.norm_error_deformed_context(p, fem_u, pred_u)
-        norm_error_u_sum += reduced_problem_u.norm_error_deformed_context(p, fem_u, pred_u)
+        norm_error_deformed_u_sum += reduced_problem_u.norm_error_deformed_context(p, global_u_solutions[p_index], pred_u)
+        norm_error_u_sum += reduced_problem_u.norm_error(global_u_solutions[p_index], pred_u)
+
+        norm_error_deformed_p_sum += reduced_problem_p.norm_error_deformed_context(p, global_p_solutions[p_index], pred_p)
+        norm_error_p_sum += reduced_problem_p.norm_error(global_p_solutions[p_index], pred_p)
     
     norm_error_deformed_u_sum = MPI.COMM_WORLD.allreduce(norm_error_u_sum, MPI.SUM)
     norm_error_u_sum = MPI.COMM_WORLD.allreduce(norm_error_u_sum, MPI.SUM)
+
+    norm_error_deformed_p_sum = MPI.COMM_WORLD.allreduce(norm_error_p_sum, MPI.SUM)
+    norm_error_p_sum = MPI.COMM_WORLD.allreduce(norm_error_p_sum, MPI.SUM)
     
-    return norm_error_deformed_u_sum / len(global_test_parameters), norm_error_u_sum / len(global_test_parameters)
+    return norm_error_deformed_u_sum / len(global_test_parameters), norm_error_u_sum / len(global_test_parameters), norm_error_deformed_p_sum / len(global_test_parameters), norm_error_p_sum / len(global_test_parameters)
 
 
 def save_all_timestamps(timer, root_rank=0):
@@ -274,7 +343,7 @@ def save_all_timestamps(timer, root_rank=0):
     timestamps = MPI.COMM_WORLD.gather(timestamps, root_rank)
     
     if MPI.COMM_WORLD.Get_rank() == root_rank:
-        results_folder = Path("results/01")
+        results_folder = Path("results")
         file_path = results_folder / 'timing.pkl'
 
         if file_path.exists():
@@ -289,13 +358,13 @@ def save_all_timestamps(timer, root_rank=0):
             pickle.dump(all_results, f)
 
 
-def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u, reduced_problem_p):
+def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p):
     # Infer solution
     # X = torch.tensor(preview_parameter.to_numpy()).to(torch.float32)
     # rb_pred = model(X)
     # rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
-    rb_pred_vec = online_nn(reduced_problem_u, None, preview_parameter.to_numpy(), model, reduced_problem_u.rb_dimension())
-
+    rb_pred_u = online_nn(reduced_problem_u, None, preview_parameter.to_numpy(), model_u, reduced_problem_u.rb_dimension())
+    rb_pred_p = online_nn(reduced_problem_p, None, preview_parameter.to_numpy(), model_p, reduced_problem_p.rb_dimension())
 
     # Full solution
     fem_u, fem_p = problem_parametric.solve(preview_parameter)
@@ -310,15 +379,16 @@ def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u
     # problem_parametric.save_results(p, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_rb")
 
     # NN solution
-    pred_u = reduced_problem_u.reconstruct_solution(rb_pred_vec) 
+    pred_u = reduced_problem_u.reconstruct_solution(rb_pred_u) 
+    pred_p = reduced_problem_p.reconstruct_solution(rb_pred_p) 
     interpolated_pred = problem_parametric.interpolated_velocity(pred_u)
-    problem_parametric.save_results(p, interpolated_pred, name_suffix="_pred")
+    problem_parametric.save_results(p, interpolated_pred, pred_p, name_suffix="_pred")
 
     # Plot difference
     u_diff = problem_parametric.interpolated_velocity(pred_u - reconstructed_u)
-    problem_parametric.save_results(p, u_diff, name_suffix="_diff")
-
-    # TODO relative difference
+    p_diff = dolfinx.fem.Function(pred_p.function_space)
+    p_diff.vector.setArray(pred_p.vector.getArray() - reconstructed_p.vector.getArray())
+    problem_parametric.save_results(p, u_diff, p_diff, name_suffix="_diff")
 
     # Divergence
     divergence_space = dolfinx.fem.FunctionSpace(problem_parametric._mesh, ufl.FiniteElement("DG", problem_parametric._mesh.ufl_cell(), 1))
@@ -348,6 +418,10 @@ def save_preview(preview_parameter, model, problem_parametric, reduced_problem_u
     div_diff.interpolate(div_diff_expr)
     problem_parametric.save_results(p, div_diff, name_suffix="_div_diff")
 
+    n = 0
+    # Plot the nth most significant RB mode projected into the full basis
+    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[n]), reduced_problem_p._basis_functions[n], name_suffix="_rb_1st_mode_other")
+
 
 if __name__ == "__main__":
     timer = Timer()
@@ -369,20 +443,32 @@ if __name__ == "__main__":
     # POD
     print(rbnicsx.io.TextBox("POD offline phase begins", fill="="))
 
-    # TODO ask: why waste time broadcasting this set to every rank, if each can generate it itself in very few operations -> in case the sampling is not deterministic, but random
-    global_training_set = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
+    range_0 = (0.5, 2.5)
+    range_1 = (0.5, 2.5)
+    range_2 = (np.pi/10, np.pi/2)
+    ranges = [range_0, range_1, range_2]
+    number_of_samples = 300
+    Nmax = 100 # Max number of POD basis functions
+    reuse_samples = False
+    
+    global_training_set = generate_parameters_list(ranges, number_of_samples)
+
     snapshots_u_matrix, snapshots_p_matrix = generate_solutions_list(global_training_set)
     mpi_print(f"Matrix built on rank {MPI.COMM_WORLD.Get_rank()} has {np.shape(snapshots_p_matrix)} snapshots.")
     timer.timestamp("POD training set calculated")
 
     print(rbnicsx.io.TextLine("perform POD", fill="#"))
-    proper_orthogonal_decomposition(reduced_problem_u, snapshots_u_matrix)
-    proper_orthogonal_decomposition(reduced_problem_p, snapshots_p_matrix)
+    e_u, m_u = proper_orthogonal_decomposition(reduced_problem_u, snapshots_u_matrix, Nmax)
+    e_p, m_p = proper_orthogonal_decomposition(reduced_problem_p, snapshots_p_matrix, Nmax)
+    if MPI.COMM_WORLD.rank == 0:
+        with open('results/eigen.npy', 'wb') as f:
+            np.save(f, [e_u, e_p])
+            np.save(f, [len(m_u), len(m_p)])
     timer.timestamp("Reduced basis calculated")
 
     # NN
     # Generate training data
-    paramteres_list = generate_parameters_list(generate_parameters_values_list([7, 7, 7]))
+    paramteres_list = generate_parameters_list(ranges, number_of_samples)
     np.random.shuffle(paramteres_list)
     solutions_list_u, solutions_list_p = generate_rb_solutions_list(paramteres_list)
 
@@ -395,16 +481,19 @@ if __name__ == "__main__":
         prepare_test_and_training_sets(paramteres_list, solutions_list_p, num_training_samples, reduced_problem_p)
     timer.timestamp("NN dataset calculated")
 
-    model = train_NN(training_dataset_u, validation_dataset_u)
+    model_u = train_NN(training_dataset_u, validation_dataset_u)
+    model_p = train_NN(training_dataset_p, validation_dataset_p)
     timer.timestamp("NN trained")
 
-    test_parameters_list = generate_parameters_list(generate_parameters_values_list([3, 3, 3]))
-    norm_error_deformed_u, norm_error_u = error_analysis(test_parameters_list, model, problem_parametric, reduced_problem_u, reduced_problem_p)
-    print(f"{norm_error_u=}, {norm_error_deformed_u=}")
+    test_parameters_list = generate_parameters_list(ranges, 27)
+    solutions_u, solutions_p = temp_generate_solutions_list(test_parameters_list) 
+    norm_error_deformed_u, norm_error_u, norm_error_deformed_p, norm_error_p = error_analysis_distr(test_parameters_list, model_u, model_p, solutions_u, solutions_p, reduced_problem_u, reduced_problem_p)
+    print(f"{norm_error_u=}, {norm_error_deformed_u=}, {norm_error_p=}, {norm_error_deformed_p=}")
+
     timer.timestamp("Error analysis completed")
 
     if MPI.COMM_WORLD.Get_rank() == 0:
-        p = Parameters(1, 2)
-        save_preview(p, model, problem_parametric, reduced_problem_u, reduced_problem_p)
+        p = Parameters(1, 2, np.pi/6)
+        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p)
     
     save_all_timestamps(timer, 0)
