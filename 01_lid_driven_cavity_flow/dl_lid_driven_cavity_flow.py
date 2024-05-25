@@ -306,6 +306,44 @@ def prepare_test_and_training_sets(parameters_list, solutions, num_training_samp
     return training_dataset, validation_dataset
 
 
+def one_prepare_test_and_training_sets(parameters_list, solutions_u, solutions_p, num_training_samples, reduced_problem_u, reduced_problem_p):
+    paramteres_values_list = np.array([p.to_numpy() for p in parameters_list])
+
+    solutions = np.concatenate((solutions_u, solutions_p), axis=1)
+    
+    input_range = np.stack((np.min(paramteres_values_list, axis=0), np.max(paramteres_values_list, axis=0)), axis=0)
+    solutions_range = np.stack((np.min(solutions, axis=0), np.max(solutions, axis=0)), axis=0)
+
+    # TODO disable transforms in CustomDataset sourcecode and compare results
+    # Training set
+    input_training_set = paramteres_values_list[:num_training_samples, :]
+    solutions_training_set = np.array(solutions)[:num_training_samples, :]
+    my_training_indices = np.array_split(range(len(input_training_set)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+    
+    # TODO seems wasteful for each instance of CustomPartitionedDataset to be keeping entire dataset and only using a subset of it
+    training_dataset = CustomPartitionedDataset(reduced_problem_u,
+                                     input_training_set,
+                                     solutions_training_set,
+                                     my_training_indices,
+                                     input_range=input_range,
+                                     output_range=solutions_range,
+                                     verbose=False)
+
+    # Validation set
+    input_validation_set = paramteres_values_list[num_training_samples:, :]
+    solutions_validation_set = np.array(solutions)[num_training_samples:, :]
+    my_validation_indices = np.array_split(range(len(input_validation_set)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
+    validation_dataset = CustomPartitionedDataset(reduced_problem_u,
+                                       input_validation_set,
+                                       solutions_validation_set,
+                                       my_validation_indices,
+                                       input_range=input_range,
+                                       output_range=solutions_range,
+                                       verbose=False)
+
+    return training_dataset, validation_dataset, input_range, solutions_range
+
+
 def train_NN(training_dataset, validation_dataset, error_analyser, test_parameters_list, solutions, reduced_problem, name):
     # u only to begin with
     
@@ -331,7 +369,7 @@ def train_NN(training_dataset, validation_dataset, error_analyser, test_paramete
 
     # TODO plot the evolution with number of epochs
     # (plot the loss function evolution, but also prediction made with NN trained up to given epoch) 
-    epochs = 4000
+    epochs = 5000
 
     norm_error_deformed_evolution = []
     norm_error_evolution = []
@@ -361,14 +399,14 @@ def train_NN(training_dataset, validation_dataset, error_analyser, test_paramete
                 model.load_state_dict(best_parameters)
                 break
 
-        if report:
-            norm_error_deformed, norm_error = error_analyser(test_parameters_list, model, solutions, reduced_problem)
-            norm_error_deformed_evolution.append(norm_error_deformed)
-            norm_error_evolution.append(norm_error)
+        # if report:
+        #     norm_error_deformed, norm_error = error_analyser(test_parameters_list, model, solutions, reduced_problem)
+        #     norm_error_deformed_evolution.append(norm_error_deformed)
+        #     norm_error_evolution.append(norm_error)
 
-    with open(f'results/error_evolution_{name}.npy', 'wb') as f:
-        np.save(f, norm_error_deformed_evolution)
-        np.save(f, norm_error_evolution)
+    # with open(f'results/error_evolution_{name}.npy', 'wb') as f:
+    #     np.save(f, norm_error_deformed_evolution)
+    #     np.save(f, norm_error_evolution)
     
     print("Model trained!")
 
@@ -404,14 +442,21 @@ def error_analysis_distr(global_test_parameters, model_u, model_p, global_u_solu
     return norm_error_deformed_u_sum / len(global_test_parameters), norm_error_u_sum / len(global_test_parameters), norm_error_deformed_p_sum / len(global_test_parameters), norm_error_p_sum / len(global_test_parameters)
 
 
-def error_analysis_distr_u(global_test_parameters, model_u, global_u_solutions, reduced_problem_u):
+def error_analysis_distr_u(global_test_parameters, model_u, global_u_solutions, reduced_problem_u, combined_network=False, input_range=None, solutions_range=None):
     my_indices = np.array_split(range(len(global_test_parameters)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
 
     norm_error_u_sum, norm_error_deformed_u_sum = 0, 0
 
     for p_index in my_indices:
         p = global_test_parameters[p_index]
-        rb_pred_u = online_nn(reduced_problem_u, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension())
+
+        if combined_network:
+            assert input_range is not None and solutions_range is not None
+            rb_pred_u = online_nn(None, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
+            rb_pred_u = rb_pred_u[:reduced_problem_u.rb_dimension()]
+        else:
+            rb_pred_u = online_nn(reduced_problem_u, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension())
+
 
         pred_u = reduced_problem_u.reconstruct_solution(rb_pred_u)
 
@@ -424,14 +469,21 @@ def error_analysis_distr_u(global_test_parameters, model_u, global_u_solutions, 
     return norm_error_deformed_u_sum / len(global_test_parameters), norm_error_u_sum / len(global_test_parameters)
 
 
-def error_analysis_distr_p(global_test_parameters, model_p, global_p_solutions, reduced_problem_p):
+def error_analysis_distr_p(global_test_parameters, model_p, global_p_solutions, reduced_problem_p, combined_network=False, input_range=None, solutions_range=None):
     my_indices = np.array_split(range(len(global_test_parameters)), MPI.COMM_WORLD.Get_size())[MPI.COMM_WORLD.Get_rank()]
 
     norm_error_p_sum, norm_error_deformed_p_sum = 0, 0
 
     for p_index in my_indices:
         p = global_test_parameters[p_index]
-        rb_pred_p = online_nn(reduced_problem_p, None, p.to_numpy(), model_p, reduced_problem_p.rb_dimension())
+
+        if combined_network:
+            assert input_range is not None and solutions_range is not None
+            rb_pred_p = online_nn(None, None, p.to_numpy(), model_p, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
+            rb_pred_p = rb_pred_p[:reduced_problem_u.rb_dimension()]
+        else:
+            rb_pred_p = online_nn(reduced_problem_p, None, p.to_numpy(), model_p, reduced_problem_p.rb_dimension())
+
 
         pred_p = reduced_problem_p.reconstruct_solution(rb_pred_p)
 
@@ -529,6 +581,72 @@ def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduce
     problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[1]), reduced_problem_p._basis_functions[1], name_suffix="_rb_2nd_mode", path=path)
 
 
+def one_save_preview(preview_parameter, model, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/"):
+    # Infer solution
+    # X = torch.tensor(preview_parameter.to_numpy()).to(torch.float32)
+    # rb_pred = model(X)
+    # rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
+    rb_pred = online_nn(None, None, preview_parameter.to_numpy(), model, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
+    rb_pred_u = rb_pred[reduced_problem_u.rb_dimension():]
+    rb_pred_p = rb_pred[:reduced_problem_u.rb_dimension()]
+
+    # Full solution
+    fem_u, fem_p = problem_parametric.solve(preview_parameter)
+    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_fem", path=path)
+
+    # Reduced basis projection of full solution
+    rb_snapshot_u = reduced_problem_u.project_snapshot(fem_u)
+    rb_snapshot_p = reduced_problem_p.project_snapshot(fem_p)
+    reconstructed_u = reduced_problem_u.reconstruct_solution(rb_snapshot_u)
+    reconstructed_p = reduced_problem_p.reconstruct_solution(rb_snapshot_p)
+    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(reconstructed_u), reconstructed_p, name_suffix="_rb", path=path)
+    # problem_parametric.save_results(p, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_rb")
+
+    # NN solution
+    pred_u = reduced_problem_u.reconstruct_solution(rb_pred_u) 
+    pred_p = reduced_problem_p.reconstruct_solution(rb_pred_p) 
+    interpolated_pred = problem_parametric.interpolated_velocity(pred_u)
+    problem_parametric.save_results(p, interpolated_pred, pred_p, name_suffix="_pred", path=path)
+
+    # Plot difference
+    u_diff = problem_parametric.interpolated_velocity(pred_u - reconstructed_u)
+    p_diff = dolfinx.fem.Function(pred_p.function_space)
+    p_diff.vector.setArray(pred_p.vector.getArray() - reconstructed_p.vector.getArray())
+    problem_parametric.save_results(p, u_diff, p_diff, name_suffix="_diff", path=path)
+
+    # Divergence
+    divergence_space = dolfinx.fem.FunctionSpace(problem_parametric._mesh, ufl.FiniteElement("DG", problem_parametric._mesh.ufl_cell(), 1))
+    divergence_plot_space = dolfinx.fem.FunctionSpace(problem_parametric._mesh, ufl.FiniteElement("CG", problem_parametric._mesh.ufl_cell(), 1))
+
+    # Plot divergence of the original one
+    fem_u_div_expr = dolfinx.fem.Expression(ufl.div(fem_u), divergence_space.element.interpolation_points())
+    fem_u_div = dolfinx.fem.Function(divergence_plot_space)
+    fem_u_div.interpolate(fem_u_div_expr)
+    problem_parametric.save_results(p, solution_vel=fem_u_div, name_suffix="_div_fem", path=path)
+
+    # Plot divergence of the reduced basis projection
+    rb_u_div_expr = dolfinx.fem.Expression(ufl.div(reconstructed_u), divergence_space.element.interpolation_points())
+    rb_u_div = dolfinx.fem.Function(divergence_plot_space)
+    rb_u_div.interpolate(rb_u_div_expr)
+    problem_parametric.save_results(p, solution_vel=rb_u_div, name_suffix="_div_rb", path=path)
+
+    # Plot divergence of the NN solution
+    pred_u_div_expr = dolfinx.fem.Expression(ufl.div(pred_u), divergence_space.element.interpolation_points())
+    pred_u_div = dolfinx.fem.Function(divergence_plot_space)
+    pred_u_div.interpolate(pred_u_div_expr)
+    problem_parametric.save_results(p, solution_vel=pred_u_div, name_suffix="_div_pred", path=path)
+
+    # Plot the difference in divergence
+    div_diff_expr = dolfinx.fem.Expression(ufl.div(pred_u) - ufl.div(reconstructed_u), divergence_space.element.interpolation_points())
+    div_diff = dolfinx.fem.Function(divergence_plot_space)
+    div_diff.interpolate(div_diff_expr)
+    problem_parametric.save_results(p, div_diff, name_suffix="_div_diff", path=path)
+
+    # Plot the first two most significant RB mode projected into the full basis
+    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[0]), reduced_problem_p._basis_functions[0], name_suffix="_rb_1st_mode", path=path)
+    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[1]), reduced_problem_p._basis_functions[1], name_suffix="_rb_2nd_mode", path=path)
+
+
 if __name__ == "__main__":
     timer = Timer()
     
@@ -553,7 +671,7 @@ if __name__ == "__main__":
     range_1 = (0.5, 2.5)
     range_2 = (np.pi/10, 9*np.pi/10)
     ranges = [range_0, range_1, range_2]
-    number_of_samples = 300
+    number_of_samples = 260
     Nmax = 100 # Max number of POD basis functions
     reuse_samples = True
     
@@ -596,21 +714,20 @@ if __name__ == "__main__":
     init_cpu_process_group(MPI.COMM_WORLD)
 
     num_training_samples = int(0.7 * len(paramteres_list))
-    training_dataset_u, validation_dataset_u =\
-        prepare_test_and_training_sets(paramteres_list, rb_solutions_list_u, num_training_samples, reduced_problem_u)
-    training_dataset_p, validation_dataset_p =\
-        prepare_test_and_training_sets(paramteres_list, rb_solutions_list_p, num_training_samples, reduced_problem_p)
+    training_dataset, validation_dataset, input_range, solutions_range =\
+        one_prepare_test_and_training_sets(paramteres_list, rb_solutions_list_u, rb_solutions_list_p, num_training_samples, reduced_problem_u, reduced_problem_p)
     # timer.timestamp("NN dataset calculated")
 
     test_parameters_list = generate_parameters_list(ranges, 27)
     solutions_u, solutions_p = temp_generate_solutions_list(test_parameters_list)
 
-    model_u = train_NN(training_dataset_u, validation_dataset_u, error_analysis_distr_u, test_parameters_list, solutions_u, reduced_problem_u, "velocity")
-    model_p = train_NN(training_dataset_p, validation_dataset_p, error_analysis_distr_p, test_parameters_list, solutions_p, reduced_problem_p, "pressure")
+    # model_u = train_NN(training_dataset_u, validation_dataset_u, error_analysis_distr_u, test_parameters_list, solutions_u, reduced_problem_u, "velocity")
+    # model_p = train_NN(training_dataset_p, validation_dataset_p, error_analysis_distr_p, test_parameters_list, solutions_p, reduced_problem_p, "pressure")
+    model = train_NN(training_dataset, validation_dataset, None, None, None, None, None)
     timer.timestamp("NN trained")
 
-    norm_error_deformed_u, norm_error_u = error_analysis_distr_u(test_parameters_list, model_u, solutions_u, reduced_problem_u)
-    norm_error_deformed_p, norm_error_p = error_analysis_distr_p(test_parameters_list, model_p, solutions_p, reduced_problem_p)
+    norm_error_deformed_u, norm_error_u = error_analysis_distr_u(test_parameters_list, model, solutions_u, reduced_problem_u, combined_network=True, input_range=input_range, solutions_range=solutions_range)
+    norm_error_deformed_p, norm_error_p = error_analysis_distr_p(test_parameters_list, model, solutions_p, reduced_problem_p, combined_network=True, input_range=input_range, solutions_range=solutions_range)
     mpi_print(f"N = {number_of_samples}, error_u= {norm_error_deformed_u}, error_p= {norm_error_deformed_p}")
     mpi_print(f"Velocity RB dimension = {reduced_problem_u.rb_dimension()} Pressure RB dimension = {reduced_problem_p.rb_dimension()}")
 
@@ -619,12 +736,12 @@ if __name__ == "__main__":
     if MPI.COMM_WORLD.Get_rank() == 0:
         # p = Parameters(1, 2, np.pi/6)
         p = Parameters(1, 1, np.pi/2)
-        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/ref/")
+        one_save_preview(p, model, input_range, solutions_range, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/ref/")
         
         p = Parameters(0.75, 2, 2*np.pi/3)
-        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/left/")
+        one_save_preview(p, model, input_range, solutions_range, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/left/")
 
         p = Parameters(2, 0.75, np.pi/6)
-        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/right/")
+        one_save_preview(p, model, input_range, solutions_range, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/right/")
     
     save_all_timestamps(timer, 0)
