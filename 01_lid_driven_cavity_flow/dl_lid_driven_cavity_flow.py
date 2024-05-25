@@ -452,8 +452,9 @@ def error_analysis_distr_u(global_test_parameters, model_u, global_u_solutions, 
 
         if combined_network:
             assert input_range is not None and solutions_range is not None
-            rb_pred_u = online_nn(None, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
-            rb_pred_u = rb_pred_u[:reduced_problem_u.rb_dimension()]
+            rb_pred = online_nn(None, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
+            rb_pred_u = PETSc.Vec().createSeq(reduced_problem_u.rb_dimension())
+            rb_pred_u.setArray(rb_pred[:reduced_problem_u.rb_dimension()])
         else:
             rb_pred_u = online_nn(reduced_problem_u, None, p.to_numpy(), model_u, reduced_problem_u.rb_dimension())
 
@@ -479,8 +480,9 @@ def error_analysis_distr_p(global_test_parameters, model_p, global_p_solutions, 
 
         if combined_network:
             assert input_range is not None and solutions_range is not None
-            rb_pred_p = online_nn(None, None, p.to_numpy(), model_p, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
-            rb_pred_p = rb_pred_p[:reduced_problem_u.rb_dimension()]
+            rb_pred = online_nn(None, None, p.to_numpy(), model_p, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
+            rb_pred_p = PETSc.Vec().createSeq(reduced_problem_p.rb_dimension())
+            rb_pred_p.setArray(rb_pred[reduced_problem_u.rb_dimension():])
         else:
             rb_pred_p = online_nn(reduced_problem_p, None, p.to_numpy(), model_p, reduced_problem_p.rb_dimension())
 
@@ -581,14 +583,17 @@ def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduce
     problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[1]), reduced_problem_p._basis_functions[1], name_suffix="_rb_2nd_mode", path=path)
 
 
-def one_save_preview(preview_parameter, model, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/"):
+def one_save_preview(preview_parameter, model, input_range, solutions_range, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/"):
     # Infer solution
     # X = torch.tensor(preview_parameter.to_numpy()).to(torch.float32)
     # rb_pred = model(X)
     # rb_pred_vec = PETSc.Vec().createWithArray(rb_pred.detach().numpy(), comm=MPI.COMM_SELF)
     rb_pred = online_nn(None, None, preview_parameter.to_numpy(), model, reduced_problem_u.rb_dimension() + reduced_problem_p.rb_dimension(), input_range=input_range, output_range=solutions_range, input_scaling_range=[-1, 1], output_scaling_range=[-1, 1])
-    rb_pred_u = rb_pred[reduced_problem_u.rb_dimension():]
-    rb_pred_p = rb_pred[:reduced_problem_u.rb_dimension()]
+    rb_pred_u = PETSc.Vec().createSeq(reduced_problem_u.rb_dimension())
+    rb_pred_u.setArray(rb_pred[:reduced_problem_u.rb_dimension()])
+    rb_pred_p = PETSc.Vec().createSeq(reduced_problem_p.rb_dimension())
+    rb_pred_p.setArray(rb_pred[reduced_problem_u.rb_dimension():])
+
 
     # Full solution
     fem_u, fem_p = problem_parametric.solve(preview_parameter)
