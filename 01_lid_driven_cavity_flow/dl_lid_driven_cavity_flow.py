@@ -358,7 +358,7 @@ def train_NN(training_dataset, validation_dataset, error_analyser, test_paramete
     output_size = len(training_dataset[0][1])
     print(f"NN {input_size=}, {output_size=}")
 
-    model = HiddenLayersNet(input_size, [30, 30], output_size, Tanh()).to(device)
+    model = HiddenLayersNet(input_size, [37, 37], output_size, Tanh()).to(device)
     # model.double() # TODO remove? Convert the entire model to Double (or would have to convert input and outputs to floats (they're now doubles)) -> DLRBniCSx conerts everything to floats internally
     model_synchronise(model, verbose=False)
 
