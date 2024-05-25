@@ -1,0 +1,30 @@
+100 samples from the range
+KSP,Preconditioner,Times
+preonly,lu,[2860338185, 2853693142, 2816303194, 2854303153]
+cg,jacobi,Failed to converge
+cg,lu,[2698584513, 2707505083, 2707910079, 2770908194]
+cg,ilu,PETSc error code 92
+cg,gamg,Failed to converge
+cg,none,[59424049220, 59366880863, 59362042549, 59369417162]
+gmres,none,Failed to converge
+gmres,jacobi,Failed to cconverge
+gmres,lu,[2746000556, 2797701196, 2833101488, 2796879606]
+gmres,ilu,PETSc error code 92
+gmres,gamg,Failed to converge
+bcgs,none,Failed to converge
+bcgs,jacobi,Failed to converge
+bcgs,lu,[2930560140, 2918567499, 3058653036, 2912519986]
+bcgs,ilu,PETSc error code 92
+bcgs,gamg,[89344479920, 89433010049, 89327948202, 89343875409]
+tfqmr,ilu,PETSc error code 92
+richardson,sor,Failed to converge (but took long so some must have converged)
+chebyshev,jacobi,Repeatedly segfault
+lsqr,ilu,PETSc error code 92
+preonly,ilu,PETSc error code 92
+preonly,jacobi,Failed to converge
+preonly,bjacobi,Failed to converge
+preonly,sor,Failed to converge
+preonly,cholesky,Failed to converge
+preonly,icc,PETSc error code 92
+
+Ask, what other combinations to check?

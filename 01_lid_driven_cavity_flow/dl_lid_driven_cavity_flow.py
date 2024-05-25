@@ -21,6 +21,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from mpi4py import MPI
 
+import copy
 import pickle
 from itertools import product
 from pathlib import Path
@@ -31,13 +32,14 @@ import numpy as np
 
 class Timer:
     def __init__(self):
-        self.__start_time = process_time_ns()
+        self.__timer = process_time_ns
+        self.__start_time = self.__timer()
         self.__timestamps = {}
 
     
     def timestamp(self, label):
         assert(label not in self.__timestamps)
-        timestamp = process_time_ns() - self.__start_time
+        timestamp = self.__timer() - self.__start_time
         self.__timestamps[label] = timestamp
 
 
@@ -334,9 +336,10 @@ def train_NN(training_dataset, validation_dataset, error_analyser, test_paramete
     norm_error_deformed_evolution = []
     norm_error_evolution = []
 
-    lowest_validation_score= np.inf
+    lowest_validation_score = np.inf
+    best_parameters = copy.deepcopy(model.state_dict())
     current_increase_length = 0
-    max_increase_length = 20
+    max_increase_length = 100
 
     for t in range(epochs):
         report = (t % 50 == 1)
@@ -349,11 +352,13 @@ def train_NN(training_dataset, validation_dataset, error_analyser, test_paramete
 
         if validation_score < lowest_validation_score:
             lowest_validation_score = validation_score
+            best_parameters = copy.deepcopy(model.state_dict())
             current_increase_length = 0
         else:
             current_increase_length += 1
             if current_increase_length >= max_increase_length:
-                print(f"Early stopping termination in epoch {t+1}")
+                print(f"Early stopping triggered. Restoring the best model parameters from epoch {t - current_increase_length + 1}")
+                model.load_state_dict(best_parameters)
                 break
 
         if report:
@@ -459,7 +464,7 @@ def save_all_timestamps(timer, root_rank=0):
             pickle.dump(all_results, f)
 
 
-def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p):
+def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/"):
     # Infer solution
     # X = torch.tensor(preview_parameter.to_numpy()).to(torch.float32)
     # rb_pred = model(X)
@@ -469,27 +474,27 @@ def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduce
 
     # Full solution
     fem_u, fem_p = problem_parametric.solve(preview_parameter)
-    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_fem")
+    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_fem", path=path)
 
     # Reduced basis projection of full solution
     rb_snapshot_u = reduced_problem_u.project_snapshot(fem_u)
     rb_snapshot_p = reduced_problem_p.project_snapshot(fem_p)
     reconstructed_u = reduced_problem_u.reconstruct_solution(rb_snapshot_u)
     reconstructed_p = reduced_problem_p.reconstruct_solution(rb_snapshot_p)
-    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(reconstructed_u), reconstructed_p, name_suffix="_rb")
+    problem_parametric.save_results(preview_parameter, problem_parametric.interpolated_velocity(reconstructed_u), reconstructed_p, name_suffix="_rb", path=path)
     # problem_parametric.save_results(p, problem_parametric.interpolated_velocity(fem_u), fem_p, name_suffix="_rb")
 
     # NN solution
     pred_u = reduced_problem_u.reconstruct_solution(rb_pred_u) 
     pred_p = reduced_problem_p.reconstruct_solution(rb_pred_p) 
     interpolated_pred = problem_parametric.interpolated_velocity(pred_u)
-    problem_parametric.save_results(p, interpolated_pred, pred_p, name_suffix="_pred")
+    problem_parametric.save_results(p, interpolated_pred, pred_p, name_suffix="_pred", path=path)
 
     # Plot difference
     u_diff = problem_parametric.interpolated_velocity(pred_u - reconstructed_u)
     p_diff = dolfinx.fem.Function(pred_p.function_space)
     p_diff.vector.setArray(pred_p.vector.getArray() - reconstructed_p.vector.getArray())
-    problem_parametric.save_results(p, u_diff, p_diff, name_suffix="_diff")
+    problem_parametric.save_results(p, u_diff, p_diff, name_suffix="_diff", path=path)
 
     # Divergence
     divergence_space = dolfinx.fem.FunctionSpace(problem_parametric._mesh, ufl.FiniteElement("DG", problem_parametric._mesh.ufl_cell(), 1))
@@ -499,29 +504,29 @@ def save_preview(preview_parameter, model_u, model_p, problem_parametric, reduce
     fem_u_div_expr = dolfinx.fem.Expression(ufl.div(fem_u), divergence_space.element.interpolation_points())
     fem_u_div = dolfinx.fem.Function(divergence_plot_space)
     fem_u_div.interpolate(fem_u_div_expr)
-    problem_parametric.save_results(p, solution_vel=fem_u_div, name_suffix="_div_fem")
+    problem_parametric.save_results(p, solution_vel=fem_u_div, name_suffix="_div_fem", path=path)
 
     # Plot divergence of the reduced basis projection
     rb_u_div_expr = dolfinx.fem.Expression(ufl.div(reconstructed_u), divergence_space.element.interpolation_points())
     rb_u_div = dolfinx.fem.Function(divergence_plot_space)
     rb_u_div.interpolate(rb_u_div_expr)
-    problem_parametric.save_results(p, solution_vel=rb_u_div, name_suffix="_div_rb")
+    problem_parametric.save_results(p, solution_vel=rb_u_div, name_suffix="_div_rb", path=path)
 
     # Plot divergence of the NN solution
     pred_u_div_expr = dolfinx.fem.Expression(ufl.div(pred_u), divergence_space.element.interpolation_points())
     pred_u_div = dolfinx.fem.Function(divergence_plot_space)
     pred_u_div.interpolate(pred_u_div_expr)
-    problem_parametric.save_results(p, solution_vel=pred_u_div, name_suffix="_div_pred")
+    problem_parametric.save_results(p, solution_vel=pred_u_div, name_suffix="_div_pred", path=path)
 
     # Plot the difference in divergence
     div_diff_expr = dolfinx.fem.Expression(ufl.div(pred_u) - ufl.div(reconstructed_u), divergence_space.element.interpolation_points())
     div_diff = dolfinx.fem.Function(divergence_plot_space)
     div_diff.interpolate(div_diff_expr)
-    problem_parametric.save_results(p, div_diff, name_suffix="_div_diff")
+    problem_parametric.save_results(p, div_diff, name_suffix="_div_diff", path=path)
 
-    n = 1
-    # Plot the nth most significant RB mode projected into the full basis
-    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[n]), reduced_problem_p._basis_functions[n], name_suffix="_rb_1st_mode")
+    # Plot the first two most significant RB mode projected into the full basis
+    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[0]), reduced_problem_p._basis_functions[0], name_suffix="_rb_1st_mode", path=path)
+    problem_parametric.save_results(Parameters(), problem_parametric.interpolated_velocity(reduced_problem_u._basis_functions[1]), reduced_problem_p._basis_functions[1], name_suffix="_rb_2nd_mode", path=path)
 
 
 if __name__ == "__main__":
@@ -548,7 +553,7 @@ if __name__ == "__main__":
     range_1 = (0.5, 2.5)
     range_2 = (np.pi/10, 9*np.pi/10)
     ranges = [range_0, range_1, range_2]
-    number_of_samples = 200
+    number_of_samples = 300
     Nmax = 100 # Max number of POD basis functions
     reuse_samples = True
     
@@ -595,7 +600,7 @@ if __name__ == "__main__":
         prepare_test_and_training_sets(paramteres_list, rb_solutions_list_u, num_training_samples, reduced_problem_u)
     training_dataset_p, validation_dataset_p =\
         prepare_test_and_training_sets(paramteres_list, rb_solutions_list_p, num_training_samples, reduced_problem_p)
-    timer.timestamp("NN dataset calculated")
+    # timer.timestamp("NN dataset calculated")
 
     test_parameters_list = generate_parameters_list(ranges, 27)
     solutions_u, solutions_p = temp_generate_solutions_list(test_parameters_list)
@@ -606,12 +611,20 @@ if __name__ == "__main__":
 
     norm_error_deformed_u, norm_error_u = error_analysis_distr_u(test_parameters_list, model_u, solutions_u, reduced_problem_u)
     norm_error_deformed_p, norm_error_p = error_analysis_distr_p(test_parameters_list, model_p, solutions_p, reduced_problem_p)
-    print(f"N = {number_of_samples}, error_u= {norm_error_deformed_u}, error_p= {norm_error_deformed_p}")
+    mpi_print(f"N = {number_of_samples}, error_u= {norm_error_deformed_u}, error_p= {norm_error_deformed_p}")
+    mpi_print(f"Velocity RB dimension = {reduced_problem_u.rb_dimension()} Pressure RB dimension = {reduced_problem_p.rb_dimension()}")
 
     timer.timestamp("Error analysis completed")
 
     if MPI.COMM_WORLD.Get_rank() == 0:
-        p = Parameters(1, 2, np.pi/6)
-        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p)
+        # p = Parameters(1, 2, np.pi/6)
+        p = Parameters(1, 1, np.pi/2)
+        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/ref/")
+        
+        p = Parameters(0.75, 2, 2*np.pi/3)
+        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/left/")
+
+        p = Parameters(2, 0.75, np.pi/6)
+        save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/right/")
     
     save_all_timestamps(timer, 0)
