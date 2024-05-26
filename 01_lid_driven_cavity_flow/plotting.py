@@ -1,5 +1,6 @@
 from matplotlib import pyplot as plt
 from matplotlib.ticker import MaxNLocator
+import seaborn as sns
 
 import csv
 from collections import defaultdict
@@ -158,6 +159,7 @@ def plot_samples():
     plot_samples_3d(ranges, global_training_set)
     plot_samples_projections(ranges, global_training_set)
 
+
 def plot_eigenvalue_decays():
     def plot_eigenvalue_decay(eigenvalues, number_of_modes, title, filename):
         # fig, ax = plt.subplots(figsize=(8, 10))
@@ -166,8 +168,8 @@ def plot_eigenvalue_decays():
         positive_eigenvalues = np.where(eigenvalues > 0., eigenvalues, np.nan)
         xint = range(1, number_of_modes + 1)
 
-        ax.plot(xint, eigenvalues[:number_of_modes], "-", color='darkblue')
-        ax.scatter(xint, eigenvalues[:number_of_modes], color='lightblue', edgecolor='darkblue', marker='^', zorder=3)
+        ax.plot(xint, eigenvalues[:number_of_modes], "-", color='tab:blue')
+        ax.scatter(xint, eigenvalues[:number_of_modes], color='lightblue', edgecolor='tab:blue', marker='^', zorder=3)
         
         ax.set_xlabel("Eigenvalue number", fontsize=18)
         ax.set_ylabel("Eigenvalue", fontsize=18)
@@ -209,11 +211,25 @@ def plot_error_evolution():
         error_evolution["norm_error_deformed_p"] = np.load(f)
         error_evolution["norm_error_p"] = np.load(f)
 
-    fig, axs = plt.subplots(1, 4, figsize=(16, 10))
-    for i, (name, values) in enumerate(error_evolution.items()):
-        axs[i].plot(values)
+    # fig, axs = plt.subplots(1, 4, figsize=(16, 10))
+    # for i, (name, values) in enumerate(error_evolution.items()):
+    #     axs[i].plot(values)
+    xs = [10 * i for i in range(len(error_evolution["norm_error_u"]))]
+    plt.plot(xs, error_evolution["norm_error_u"], color='tab:blue')
+    # plt.scatter(xs, error_evolution["norm_error_u"], color='lightblue', edgecolors='tab:blue', marker='^', zorder=3)
+    plt.xlabel("Epoch number")
+    plt.ylabel("Error")
+    plt.grid(True, linestyle='dashed', linewidth=0.5)
+    save('error_evolution_u.png')
 
-    save('error_evolution.png')
+    plt.clf()
+    xs = [10 * i for i in range(len(error_evolution["norm_error_p"]))]
+    plt.plot(xs, error_evolution["norm_error_p"], color='tab:blue')
+    # plt.scatter(xs, error_evolution["norm_error_p"], color='lightblue', edgecolors='tab:blue', marker='^', zorder=3)
+    plt.xlabel("Epoch number")
+    plt.ylabel("Error")
+    plt.grid(True, linestyle='dashed', linewidth=0.5)
+    save('error_evolution_p.png')
 
 
 def compare_reuse():
@@ -280,5 +296,85 @@ def compare_reuse():
     plot_comparisons(stats_reuse, stats_no_reuse, 'p')
 
 
+def solvers_benchmark():
+    # Provided data
+    data = [
+        ("preonly", "lu", 1),
+        ("cg", "jacobi", -1),
+        ("cg", "lu", 1),
+        ("cg", "gamg", -1),
+        ("cg", "none", -1),
+        ("gmres", "none", -1),
+        ("gmres", "jacobi", -1),
+        ("gmres", "lu", 1),
+        ("gmres", "gamg", -1),
+        ("bcgs", "none", -1),
+        ("bcgs", "jacobi", -1),
+        ("bcgs", "lu", 1),
+        ("bcgs", "gamg", 0),
+        ("richardson", "sor", -1),
+        ("chebyshev", "jacobi", -1),
+        ("preonly", "jacobi", -1),
+        ("preonly", "bjacobi", -1),
+        ("preonly", "sor", -1),
+        ("preonly", "cholesky", -1)
+    ]
+
+    # Updated annotations to replace 1 labels
+    annotations = [
+        ("preonly", "lu", 11.38),
+        ("cg", "lu", 10.88),
+        ("gmres", "lu", 11.17),
+        ("bcgs", "lu", 11.82),
+        ("bcgs", "gamg", 357.44)
+    ]
+
+    # Extract unique methods and preconditioners
+    methods = sorted(set(item[0] for item in data))
+    preconditioners = sorted(set(item[1] for item in data))
+
+    # Create a 2D array for the heatmap data
+    heatmap_array = np.full((len(methods), len(preconditioners)), np.nan)
+
+    # Fill the array with values from the provided data
+    for method, preconditioner, value in data:
+        method_idx = methods.index(method)
+        preconditioner_idx = preconditioners.index(preconditioner)
+        heatmap_array[method_idx, preconditioner_idx] = value
+
+    # Create a dictionary for quick lookup of annotations
+    annotation_dict = {(method, preconditioner): annotation for method, preconditioner, annotation in annotations}
+
+    # Create an annotation array for the heatmap
+    annot_array = np.full((len(methods), len(preconditioners)), "", dtype=object)
+
+    # Fill the annotation array with the provided annotations and leave the rest empty
+    for method, preconditioner, value in data:
+        method_idx = methods.index(method)
+        preconditioner_idx = preconditioners.index(preconditioner)
+        if (method, preconditioner) in annotation_dict:
+            annot_array[method_idx, preconditioner_idx] = annotation_dict[(method, preconditioner)]
+        else:
+            annot_array[method_idx, preconditioner_idx] = "" if value != 1 else value
+
+    # Define a custom color map with the specified colors
+    # cmap = sns.color_palette(["#ee3e31", "#f78837", "#1a8a5a"])
+    # cmap = sns.color_palette(["crimson", "orange", "seagreen"])
+    cmap = sns.color_palette(["crimson", "#f78837", "#1a8a5a"])
+
+    # Create the heatmap with the specified custom colors, no title, and updated y-axis label
+    # plt.figure(figsize=(10, 8))
+    sns.heatmap(heatmap_array, annot=annot_array, fmt="", cmap=cmap, cbar=False, xticklabels=preconditioners, yticklabels=methods, linewidths=4, linecolor='white')
+
+    # Set labels
+    plt.xlabel("Preconditioner")
+    plt.ylabel("Krylov subspace method")
+
+    # Rotate the y-axis labels to be horizontal
+    plt.yticks(rotation=0)
+
+    save("solvers.png")
+
+
 if __name__ == "__main__":
-    plot_eigenvalue_decays()
+    plot_error_evolution()
