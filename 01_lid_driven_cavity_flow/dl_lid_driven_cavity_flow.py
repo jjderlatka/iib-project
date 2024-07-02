@@ -25,14 +25,14 @@ import copy
 import pickle
 from itertools import product
 from pathlib import Path
-from time import process_time_ns
+from time import process_time_ns, perf_counter_ns
 
 import numpy as np
 
 
 class Timer:
     def __init__(self):
-        self.__timer = process_time_ns
+        self.__timer = perf_counter_ns
         self.__start_time = self.__timer()
         self.__timestamps = {}
 
@@ -626,5 +626,26 @@ if __name__ == "__main__":
 
         p = Parameters(2, 0.75, np.pi/6)
         save_preview(p, model_u, model_p, problem_parametric, reduced_problem_u, reduced_problem_p, path="results/right/")
+
+        test_parameters_list = generate_parameters_list(ranges, 100)
+        FEM_times = []
+        POD_ANN_times = []
+
+        for i, params in enumerate(test_parameters_list):
+            print(i)
+            start_time = process_time_ns()
+            problem_parametric.solve(params)
+            end_time = process_time_ns()
+            FEM_times.append(end_time-start_time)
+
+            start_time = process_time_ns()
+            online_nn(reduced_problem_u, None, params.to_numpy(), model_u, reduced_problem_u.rb_dimension())
+            online_nn(reduced_problem_p, None, params.to_numpy(), model_p, reduced_problem_p.rb_dimension())
+            end_time = process_time_ns()
+            POD_ANN_times.append(end_time-start_time)
+
+        with open('results/online_time.npy', 'wb') as f:
+            np.save(f, FEM_times)
+            np.save(f, POD_ANN_times)
     
     save_all_timestamps(timer, 0)

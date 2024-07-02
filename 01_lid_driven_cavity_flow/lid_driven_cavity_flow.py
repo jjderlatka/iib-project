@@ -11,6 +11,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 import numpy as np
+from scipy.sparse import csr_matrix
 from matplotlib import pyplot as plt
 
 from pathlib import Path
@@ -135,6 +136,34 @@ class ProblemOnDeformedDomain():
                     xdmf.write_function(solution_p)
     
 
+    def plot_jacobian_sparsity(self, parameters):
+        # Generate the form and the boundary conditions
+        F, w_trial = self.get_problem_formulation(parameters)
+        bcs = self.get_boundary_conditions()
+        
+        # Derivative to get the Jacobian form
+        # J_form = ufl.derivative(F, w_trial, ufl.TrialFunction(self._W))
+        J_form = dolfinx.fem.form(ufl.derivative(F, w_trial))
+
+        J_matrix = dolfinx.fem.petsc.create_matrix(J_form)
+
+        # Assemble the matrix with boundary conditions applied
+        dolfinx.fem.petsc.assemble_matrix(J_matrix, J_form, bcs=bcs)
+        J_matrix.assemble()
+
+        # Extract CSR data to plot
+        rows, cols, values = J_matrix.getValuesCSR()
+        sparsity_pattern = csr_matrix((np.ones_like(values, dtype=bool), cols, rows), shape=J_matrix.getSize())
+        
+        # Plotting code
+        plt.figure(figsize=(8, 8))
+        plt.spy(sparsity_pattern, markersize=0.5, color='tab:blue')
+        plt.title('Jacobian Sparsity Pattern')
+        plt.xlabel('Column index')
+        plt.ylabel('Row index')
+        plt.savefig('results/jacobian_sparsity_pattern.png', dpi=600)
+    
+    
     def solve(self, parameters=Parameters()):
         with  self.meshDeformationContext(self._mesh, 
                     self._facet_tags, 
