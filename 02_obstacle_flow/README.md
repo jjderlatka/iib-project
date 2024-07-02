@@ -1,0 +1,2 @@
+# Obstacle flow problem 
+This demo, commonly known as the "DFG 2D-3 benchmark", aims to demonstrate capabilities of the method on a time dependent problem, with a more complex geometry. It is still a work in progress.
