@@ -13,10 +13,10 @@ The offline stage features parallelisation both in dataset generation and neural
 Full report on the project can be found in the root directory of the repo.
 
 ## ⬇️ Installation
-docker image
-RBniCSx
-MDFEniCSx
-DLRBniCSx
+Most dependencies required for this project are easily obtained by using the [docker image](https://github.com/jorgensd/dolfinx-tutorial/pkgs/container/dolfinx-tutorial). The missing ones, which have to be cloned manually are
+[RBniCSx](https://github.com/RBniCS/RBniCSx), 
+[MDFEniCSx](https://github.com/niravshah241/MDFEniCSx)
+and [DLRBniCSx](https://github.com/Wells-Group/dlrbnicsx).
 
 ## 🚀 Running the code
 Instructions on running the code can be found in each demo's folder.
